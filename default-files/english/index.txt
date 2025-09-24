@@ -1,0 +1,213 @@
+API Overview: Task Management System
+
+Define class TaskManager:
+    Properties:
+        - tasks: list of Task objects
+        - currentUser: User object
+        - database: DatabaseConnection object
+
+    Methods:
+        - initialize(databaseUrl: string) -> void
+            Connect to database at given URL
+            Load existing tasks from database
+            Set currentUser to null
+
+        - createTask(title: string, description: string, dueDate: date) -> Task
+            Create new Task object with given parameters
+            Set task status to "pending"
+            Add task to tasks list
+            Save task to database
+            Return created task
+
+        - getTask(taskId: string) -> Task or null
+            Search for task with matching ID in tasks list
+            Return task if found, otherwise return null
+
+        - updateTask(taskId: string, updates: object) -> boolean
+            Find task with matching ID
+            Apply updates to task properties
+            Save updated task to database
+            Return true if successful, false otherwise
+
+        - deleteTask(taskId: string) -> boolean
+            Find task with matching ID
+            Remove task from tasks list
+            Delete task from database
+            Return true if successful, false otherwise
+
+        - listTasks(filter: object optional) -> list of Task
+            If filter provided:
+                Apply filter criteria (status, assignee, dueDate)
+                Return matching tasks
+            Otherwise:
+                Return all tasks in tasks list
+
+        - assignTask(taskId: string, userId: string) -> boolean
+            Find task with matching ID
+            Find user with matching ID
+            Set task assignee to user
+            Send notification to user
+            Return true if successful, false otherwise
+
+Define class Task:
+    Properties:
+        - id: string (unique identifier)
+        - title: string
+        - description: string
+        - status: string (one of: "pending", "in_progress", "completed", "cancelled")
+        - createdAt: datetime
+        - updatedAt: datetime
+        - dueDate: date optional
+        - assignee: User object optional
+        - priority: string (one of: "low", "medium", "high", "critical")
+        - tags: list of strings
+        - comments: list of Comment objects
+
+    Methods:
+        - markAsComplete() -> void
+            Set status to "completed"
+            Set updatedAt to current time
+            Trigger completion notification
+
+        - addComment(author: User, text: string) -> Comment
+            Create new Comment with author and text
+            Add comment to comments list
+            Set updatedAt to current time
+            Return created comment
+
+        - updatePriority(newPriority: string) -> void
+            Validate newPriority is valid priority level
+            Set priority to newPriority
+            Set updatedAt to current time
+
+        - isOverdue() -> boolean
+            If dueDate exists and is before current date:
+                Return true
+            Otherwise:
+                Return false
+
+Define class User:
+    Properties:
+        - id: string (unique identifier)
+        - username: string
+        - email: string
+        - role: string (one of: "admin", "manager", "member")
+        - assignedTasks: list of Task objects
+        - createdAt: datetime
+
+    Methods:
+        - canEditTask(task: Task) -> boolean
+            If role is "admin":
+                Return true
+            If role is "manager" and task assignee is self or null:
+                Return true
+            If task assignee is self:
+                Return true
+            Otherwise:
+                Return false
+
+        - getActiveTasks() -> list of Task
+            Filter assignedTasks where status is not "completed" or "cancelled"
+            Return filtered list sorted by dueDate
+
+Define class Comment:
+    Properties:
+        - id: string (unique identifier)
+        - author: User object
+        - text: string
+        - createdAt: datetime
+        - editedAt: datetime optional
+
+    Methods:
+        - edit(newText: string) -> void
+            Set text to newText
+            Set editedAt to current time
+
+        - wasEdited() -> boolean
+            Return true if editedAt exists, false otherwise
+
+Define class DatabaseConnection:
+    Properties:
+        - connectionUrl: string
+        - isConnected: boolean
+        - connectionPool: object
+
+    Methods:
+        - connect(url: string) -> boolean
+            Establish connection to database at URL
+            Initialize connection pool
+            Set isConnected to true
+            Return true if successful, false otherwise
+
+        - disconnect() -> void
+            Close all connections in pool
+            Set isConnected to false
+
+        - save(object: any, collection: string) -> boolean
+            Serialize object to JSON
+            Write to specified collection
+            Return true if successful, false otherwise
+
+        - find(query: object, collection: string) -> list of objects
+            Execute query on specified collection
+            Return matching objects
+
+        - delete(id: string, collection: string) -> boolean
+            Remove object with matching ID from collection
+            Return true if successful, false otherwise
+
+Define interface NotificationService:
+    Methods:
+        - sendEmail(recipient: User, subject: string, body: string) -> boolean
+        - sendPushNotification(recipient: User, title: string, message: string) -> boolean
+        - sendSMS(recipient: User, message: string) -> boolean
+
+Define enum TaskStatus:
+    Values:
+        - PENDING = "pending"
+        - IN_PROGRESS = "in_progress"
+        - COMPLETED = "completed"
+        - CANCELLED = "cancelled"
+
+Define enum Priority:
+    Values:
+        - LOW = "low"
+        - MEDIUM = "medium"
+        - HIGH = "high"
+        - CRITICAL = "critical"
+
+Define enum UserRole:
+    Values:
+        - ADMIN = "admin"
+        - MANAGER = "manager"
+        - MEMBER = "member"
+
+Main entry point:
+    Function main():
+        Create new TaskManager instance
+        Initialize with database URL from environment variable
+
+        If initialization successful:
+            Start API server on port 3000
+            Log "Task Management API started successfully"
+        Otherwise:
+            Log error "Failed to initialize Task Manager"
+            Exit with error code 1
+
+Error handling:
+    All methods that can fail should:
+        - Log detailed error messages
+        - Return appropriate error codes or null values
+        - Not throw unhandled exceptions
+
+    Database operations should:
+        - Retry failed operations up to 3 times
+        - Use exponential backoff for retries
+        - Log all retry attempts
+
+Validation rules:
+    - Task title: required, max 100 characters
+    - Task description: optional, max 1000 characters
+    - User email: must be valid email format
+    - Dates: must be valid ISO 8601 format
+    - IDs: must be valid UUID v4 format

@@ -13,22 +13,30 @@ async function algo(language, englishString, oldLanguageString) {
     const englishFiles = parseFileStructure(englishString);
     const oldLanguageFiles = parseFileStructure(oldLanguageString);
 
+    // Check if there are existing files
+    const hasExistingFiles = Object.keys(oldLanguageFiles).length > 0;
+
     // Create the prompt for GPT-5
     const prompt = `
-Task: Update ${language} code files to match the English specification.
+Task: ${hasExistingFiles ? 'Update' : 'Create'} ${language} code files to match the English specification.
 
 Instructions:
 1. Analyze the English language specification files below
-2. Update the existing ${language} code to implement the English spec
-3. Keep changes minimal - preserve existing code style and structure
-4. Output ONLY a valid JSON object with filename keys and file content values
-5. Do not include any explanation, markdown, or extra text
+2. ${hasExistingFiles
+    ? `Update the existing ${language} code to implement the English spec. If files are missing that should exist based on the spec, CREATE them with appropriate content.`
+    : `Create NEW ${language} files that implement the English spec since no existing files were found.`}
+3. ${hasExistingFiles ? 'For existing files: Keep changes minimal - preserve existing code style and structure' : 'Create clean, idiomatic code following best practices for ' + language}
+4. If the English spec references files that don't exist in the current implementation, CREATE those missing files
+5. Output ONLY a valid JSON object with filename keys and file content values
+6. Do not include any explanation, markdown, or extra text
 
 English Specification Files:
 ${JSON.stringify(englishFiles, null, 2)}
 
 Current ${language} Implementation Files:
-${JSON.stringify(oldLanguageFiles, null, 2)}
+${hasExistingFiles ? JSON.stringify(oldLanguageFiles, null, 2) : '(No existing files - please create all necessary files from scratch)'}
+
+IMPORTANT: You may need to CREATE new files if they don't exist but should exist based on the English specification.
 
 Output format (MUST be valid JSON):
 {

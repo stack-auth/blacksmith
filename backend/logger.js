@@ -30,13 +30,13 @@ class Logger {
     // Fancy section headers
     header(title) {
         const line = '═'.repeat(50);
-        console.log(chalk.magenta.bold(`\n${line}`));
+        console.log('\n' + chalk.magenta.bold(`${line}`));
         console.log(chalk.magenta.bold(`  ${title}`));
-        console.log(chalk.magenta.bold(`${line}\n`));
+        console.log(chalk.magenta.bold(`${line}`) + '\n');
     }
 
     subheader(title) {
-        console.log(chalk.blueBright.bold(`\n▶ ${title}`));
+        console.log('\n' + chalk.blueBright.bold(`▶ ${title}`) + '\n');
     }
 
     // Progress tracking with spinners
@@ -205,7 +205,7 @@ class Logger {
 
     // Separator lines
     separator() {
-        console.log(chalk.gray('─'.repeat(50)));
+        console.log('\n' + chalk.gray('─'.repeat(50)) + '\n');
     }
 
     // Table display for structured data

@@ -25,6 +25,10 @@ app.use((req, res, next) => {
 
 const PORT = 3003;
 
+// Global state for managing concurrent /update requests
+let currentUpdateController = null;
+let currentUpdatePromise = null;
+
 // Hardcoded list of 10 programming languages
 const LANGUAGES = [
     'javascript',
@@ -94,7 +98,7 @@ async function readFilesFromDirectory(dirPath) {
                 result[file] = content;
             }
         }
-        logger.debug(`Found ${logger.highlight(Object.keys(result).length)} files`);
+        logger.debug(`  Found ${logger.highlight(Object.keys(result).length)} files`);
     } else {
         logger.debug(`Directory ${logger.dim(dirPath)} does not exist`);
     }
@@ -118,12 +122,69 @@ function concatenateFiles(filesObj) {
 }
 
 app.post('/update', async (req, res) => {
+    // Cancel any existing update request
+    if (currentUpdateController) {
+        logger.warning('⚠️  Cancelling previous update request...');
+        currentUpdateController.abort();
+
+        // Wait for the previous request to finish cancelling
+        if (currentUpdatePromise) {
+            try {
+                await currentUpdatePromise;
+            } catch (e) {
+                // Ignore cancellation errors
+            }
+        }
+    }
+
+    // Create new abort controller for this request
+    const abortController = new AbortController();
+    currentUpdateController = abortController;
+
+    // Store the promise for this update
+    currentUpdatePromise = processUpdate(req, res, abortController.signal);
+
+    try {
+        await currentUpdatePromise;
+    } finally {
+        // Clean up if this is still the current update
+        if (currentUpdateController === abortController) {
+            currentUpdateController = null;
+            currentUpdatePromise = null;
+        }
+    }
+});
+
+async function processUpdate(req, res, signal) {
     try {
         logger.header('Processing Language Update Request');
         const startTime = Date.now();
 
+        // Check if cancelled
+        if (signal.aborted) {
+            logger.warning('Request cancelled before starting');
+            return res.status(499).json({ success: false, message: 'Request cancelled' });
+        }
+
         // Ensure files folder exists
         const filesPath = await ensureFilesFolder();
+
+        // Discard all unstaged changes at the beginning
+        logger.subheader('Preparing Git Repository');
+        try {
+            const resetSpinner = logger.startSpinner('git-reset', 'Discarding unstaged changes...');
+            await execPromise('git checkout -- .', { cwd: filesPath });
+            await execPromise('git clean -fd', { cwd: filesPath });
+            logger.succeedSpinner('git-reset', 'Repository cleaned - unstaged changes discarded');
+        } catch (error) {
+            logger.warning('Could not reset repository:', error.message);
+        }
+
+        // Check if cancelled after git operations
+        if (signal.aborted) {
+            logger.warning('Request cancelled after git reset');
+            return res.status(499).json({ success: false, message: 'Request cancelled' });
+        }
 
         const englishPath = path.join(filesPath, 'english');
         const languagesPath = path.join(filesPath, 'languages');
@@ -136,9 +197,20 @@ app.post('/update', async (req, res) => {
 
         // Process each language
         logger.subheader('Processing Languages');
-        logger.info(`Processing ${logger.highlight(LANGUAGES.length)} languages...\n`);
+        logger.info(`Processing ${logger.highlight(LANGUAGES.length)} languages...`);
 
         for (let i = 0; i < LANGUAGES.length; i++) {
+            // Check if cancelled before processing each language
+            if (signal.aborted) {
+                logger.warning('Request cancelled during language processing');
+                return res.status(499).json({
+                    success: false,
+                    message: 'Request cancelled',
+                    processed: i,
+                    total: LANGUAGES.length
+                });
+            }
+
             const language = LANGUAGES[i];
             logger.progressBar(i, LANGUAGES.length, `Processing ${language}...`);
             const languagePath = path.join(languagesPath, language);
@@ -149,9 +221,21 @@ app.post('/update', async (req, res) => {
             const languageFiles = await readFilesFromDirectory(languagePath);
             const oldLanguageString = concatenateFiles(languageFiles);
 
-            // Call algo function (now async)
+            // Call algo function (now async) - this cannot be cancelled mid-execution
             logger.updateSpinner(`lang-${language}`, `Running algorithm for ${language}...`);
             const result = await algo(language, englishString, oldLanguageString);
+
+            // Check if cancelled after algo execution
+            if (signal.aborted) {
+                logger.stopSpinner(`lang-${language}`);
+                logger.warning('Request cancelled after algorithm execution');
+                return res.status(499).json({
+                    success: false,
+                    message: 'Request cancelled',
+                    processed: i,
+                    total: LANGUAGES.length
+                });
+            }
 
             // Write result files to language folder
             if (result && typeof result === 'object') {
@@ -167,6 +251,7 @@ app.post('/update', async (req, res) => {
                 }
 
                 logger.succeedSpinner(`lang-${language}`, `${language} completed - ${Object.keys(result).length} files written`);
+                console.log('');
                 logger.language(language, 'completed');
             } else {
                 logger.warnSpinner(`lang-${language}`, `${language} skipped - no output from algorithm`);
@@ -174,8 +259,24 @@ app.post('/update', async (req, res) => {
             }
         }
 
+        console.log('');
         logger.progressBar(LANGUAGES.length, LANGUAGES.length, 'All languages processed!');
-        logger.separator();
+
+        // Stage all changes unless cancelled
+        if (!signal.aborted) {
+            logger.subheader('Staging Changes');
+            const stageSpinner = logger.startSpinner('git-stage', 'Staging all changes...');
+            try {
+                await execPromise('git add -A', { cwd: filesPath });
+                logger.gitOperation('git add -A', true);
+                logger.succeedSpinner('git-stage', 'All changes staged successfully');
+            } catch (error) {
+                logger.failSpinner('git-stage', 'Failed to stage changes');
+                logger.error('Staging error:', error.message);
+            }
+        } else {
+            logger.warning('Skipping staging due to cancellation');
+        }
 
         const totalTime = Date.now() - startTime;
         logger.separator();
@@ -199,15 +300,35 @@ app.post('/update', async (req, res) => {
         });
 
     } catch (error) {
-        logger.error('❌ Error processing update:', error.message);
-        logger.debug('Stack trace:', error.stack);
+        // Check if it's a cancellation
+        if (error.name === 'AbortError' || (signal && signal.aborted)) {
+            logger.warning('Update request was cancelled');
+            if (!res.headersSent) {
+                res.status(499).json({
+                    success: false,
+                    message: 'Request cancelled'
+                });
+            }
+        } else {
+            logger.error('❌ Error processing update:', error.message);
+            logger.debug('Stack trace:', error.stack);
 
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
+            if (!res.headersSent) {
+                res.status(500).json({
+                    success: false,
+                    error: error.message
+                });
+            }
+        }
+    } finally {
+        // Cleanup any remaining spinners
+        for (const language of LANGUAGES) {
+            logger.stopSpinner(`lang-${language}`);
+        }
+        logger.stopSpinner('git-reset');
+        logger.stopSpinner('git-stage');
     }
-});
+}
 
 // POST /commit endpoint - commits changes to git
 app.post('/commit', async (req, res) => {
@@ -315,10 +436,13 @@ app.post('/commit', async (req, res) => {
 app.listen(PORT, () => {
     logger.header('Blacksmith Backend Server');
     logger.success(`🚀 Server running on port ${logger.highlight(PORT)}`);
+    console.log('');
     logger.info(`📍 Endpoints:`);
     logger.info(`   - POST http://localhost:${PORT}/update`);
     logger.info(`   - POST http://localhost:${PORT}/commit`);
+    console.log('');
     logger.info(`📂 Working directory: ${logger.dim(process.cwd())}`);
     logger.separator();
     logger.info('Waiting for requests...');
+    console.log('');
 });

@@ -1,7 +1,6 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState, useTransition } from 'react';
-import dynamic from 'next/dynamic';
 import clsx from 'clsx';
 import {
   ArrowUpRight,
@@ -16,19 +15,6 @@ import {
 import { approveLanguage, rejectLanguage, updateEnglish } from '@/app/actions';
 import { getLanguageVisual } from '@/lib/languageMeta';
 import type { FileEntry, LanguageWithStatus } from '@/lib/fileSystem';
-
-// Dynamically import Monaco to avoid SSR issues
-const MonacoDiffEditor = dynamic(
-  () => import('./MonacoDiffEditor').then((mod) => mod.MonacoDiffEditor),
-  {
-    ssr: false,
-    loading: () => (
-      <div className="flex h-full items-center justify-center bg-[#1e1e1e]">
-        <Loader2 className="h-8 w-8 animate-spin text-accent" />
-      </div>
-    )
-  }
-);
 
 export interface WorkspaceProps {
   languages: LanguageWithStatus[];
@@ -298,36 +284,6 @@ export function Workspace({
     }
   };
 
-  const handleSaveFile = async (newContent: string) => {
-    if (!activeFile?.path || !currentLanguage) return;
-
-    setBanner(null);
-    try {
-      const response = await fetch('http://localhost:3003/save-file', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          language: currentLanguage,
-          filePath: activeFile.path,
-          content: newContent
-        })
-      });
-
-      const data = await response.json();
-      if (data.success) {
-        setBanner({ type: 'success', message: `File saved and staged: ${activeFile.path}` });
-        // Update the local content
-        setContent(newContent);
-        // Refresh files to update git status
-        await fetchFiles(currentLanguage);
-      } else {
-        throw new Error(data.error);
-      }
-    } catch (error) {
-      setBanner({ type: 'error', message: (error as Error).message });
-    }
-  };
-
   const runAction = (
     action: () => Promise<unknown>,
     successMessage: string,
@@ -567,14 +523,23 @@ export function Workspace({
           </div>
         )}
 
-        <div className="relative flex-1 overflow-hidden bg-[#1e1e1e]">
-          <MonacoDiffEditor
-            language={currentLanguage}
-            filePath={activeFile?.path || null}
-            currentContent={content}
-            onSave={handleSaveFile}
-            readOnly={false}
-          />
+        <div className="relative flex-1 overflow-hidden bg-[#030712]">
+          {loadingContent && (
+            <div className="absolute inset-0 z-10 flex items-center justify-center bg-[#030712]/80">
+              <Loader2 className="h-8 w-8 animate-spin text-accent" />
+            </div>
+          )}
+          {activeFile ? (
+            <pre className="h-full w-full overflow-auto px-8 py-6 text-sm text-slate-200">
+              <code className="font-mono whitespace-pre-wrap leading-6 text-[13px] text-slate-200">
+                {content}
+              </code>
+            </pre>
+          ) : (
+            <div className="flex h-full items-center justify-center text-sm text-slate-500">
+              Select a file to preview its contents.
+            </div>
+          )}
         </div>
       </section>
     </div>

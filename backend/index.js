@@ -185,18 +185,26 @@ app.post('/update', async (req, res) => {
             await execPromise('git add -A', { cwd: filesPath });
             logger.gitOperation('git add -A', true);
 
-            await execPromise('git commit -m "Update language files"', { cwd: filesPath });
-            logger.gitOperation('git commit -m "Update language files"', true);
-            logger.succeedSpinner('commit', 'Changes committed successfully');
-        } catch (error) {
-            // Ignore if nothing to commit
-            if (!error.message.includes('nothing to commit')) {
-                logger.failSpinner('commit', 'Failed to commit changes');
-                logger.gitOperation('git commit', false);
-                throw error;
-            } else {
-                logger.warnSpinner('commit', 'No changes to commit');
+            // Try regular commit first
+            try {
+                await execPromise('git commit -m "Update language files"', { cwd: filesPath });
+                logger.gitOperation('git commit -m "Update language files"', true);
+                logger.succeedSpinner('commit', 'Changes committed successfully');
+            } catch (commitError) {
+                // If nothing to commit, create an empty commit
+                if (commitError.message.includes('nothing to commit')) {
+                    logger.updateSpinner('commit', 'No changes detected, creating empty commit...');
+                    await execPromise('git commit --allow-empty -m "Update language files (no changes)"', { cwd: filesPath });
+                    logger.gitOperation('git commit --allow-empty -m "Update language files (no changes)"', true);
+                    logger.succeedSpinner('commit', 'Empty commit created successfully');
+                } else {
+                    throw commitError;
+                }
             }
+        } catch (error) {
+            logger.failSpinner('commit', 'Failed to commit changes');
+            logger.gitOperation('git commit', false);
+            throw error;
         }
 
         const totalTime = Date.now() - startTime;

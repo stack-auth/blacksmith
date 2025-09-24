@@ -30,12 +30,6 @@ Instructions:
 5. Output ONLY a valid JSON object with filename keys and file content values
 6. Do not include any explanation, markdown, or extra text
 
-English Specification Files:
-${JSON.stringify(englishFiles, null, 2)}
-
-Current ${language} Implementation Files:
-${hasExistingFiles ? JSON.stringify(oldLanguageFiles, null, 2) : '(No existing files - please create all necessary files from scratch)'}
-
 IMPORTANT: You may need to CREATE new files if they don't exist but should exist based on the English specification.
 
 Output format (MUST be valid JSON):
@@ -45,18 +39,34 @@ Output format (MUST be valid JSON):
 }
 `.trim();
 
+    const input = `
+
+English Specification Files:
+${JSON.stringify(englishFiles, null, 2)}
+
+Current ${language} Implementation Files:
+${hasExistingFiles ? JSON.stringify(oldLanguageFiles, null, 2) : '(No existing files - please create all necessary files from scratch)'}
+
+    `.trim();
+
     try {
         logger.debug(`Calling GPT-5 for ${language}...`);
 
-        const result = await openai.responses.create({
+        const resp = await openai.chat.completions.create({
             model: "gpt-5-mini",
-            input: prompt,
-            reasoning: { effort: "medium" },
-            text: { verbosity: "low" },
+            // Ask for strict JSON output (single JSON object)
             response_format: { type: 'json_object' },
+            reasoning_effort: "low",
+            messages: [
+              {
+                role: 'system',
+                content: prompt,
+              },
+              { role: 'user', content: input },
+            ],
         });
 
-        const outputText = result.output_text;
+        const outputText = resp.choices?.[0]?.message?.content ?? '';
 
         // Validate and parse the response
         let parsedOutput;

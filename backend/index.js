@@ -39,6 +39,15 @@ const PORT = 3003;
 let currentUpdateController = null;
 let currentUpdatePromise = null;
 
+// Global progress tracking
+let updateProgress = {
+    progress: 0,
+    progress_message: 'No update in progress',
+    isRunning: false,
+    startTime: null,
+    error: null
+};
+
 // Hardcoded list of 10 programming languages
 const LANGUAGES = [
     'javascript',
@@ -166,6 +175,13 @@ app.post('/update', async (req, res) => {
     if (currentUpdateController) {
         logger.warning('⚠️  Cancelling previous update request...');
         currentUpdateController.abort();
+        updateProgress = {
+            progress: 0,
+            progress_message: 'Previous update cancelled, starting new update...',
+            isRunning: true,
+            startTime: Date.now(),
+            error: null
+        };
 
         // Wait for the previous request to finish cancelling
         if (currentUpdatePromise) {
@@ -181,21 +197,60 @@ app.post('/update', async (req, res) => {
     const abortController = new AbortController();
     currentUpdateController = abortController;
 
-    // Store the promise for this update
-    currentUpdatePromise = processUpdate(req, res, abortController.signal);
+    // Initialize progress
+    updateProgress = {
+        progress: 0,
+        progress_message: 'Starting update process...',
+        isRunning: true,
+        startTime: Date.now(),
+        error: null
+    };
 
-    try {
-        await currentUpdatePromise;
-    } finally {
+    // Return immediately
+    res.json({
+        success: true,
+        message: 'Update started in background',
+        startTime: updateProgress.startTime
+    });
+
+    // Process update in background
+    currentUpdatePromise = processUpdate(abortController.signal);
+
+    currentUpdatePromise.then(() => {
+        if (currentUpdateController === abortController) {
+            updateProgress = {
+                progress: 1,
+                progress_message: 'Update completed successfully',
+                isRunning: false,
+                startTime: updateProgress.startTime,
+                error: null
+            };
+        }
+    }).catch((error) => {
+        if (currentUpdateController === abortController) {
+            updateProgress = {
+                progress: updateProgress.progress,
+                progress_message: error.message || 'Update failed',
+                isRunning: false,
+                startTime: updateProgress.startTime,
+                error: error.message
+            };
+        }
+    }).finally(() => {
         // Clean up if this is still the current update
         if (currentUpdateController === abortController) {
             currentUpdateController = null;
             currentUpdatePromise = null;
         }
-    }
+    });
 });
 
-async function processUpdate(req, res, signal) {
+// GET /progress endpoint - returns current update progress
+app.get('/progress', (req, res) => {
+    res.json(updateProgress);
+});
+
+async function processUpdate(signal) {
     const processedLanguages = [];
 
     try {
@@ -205,18 +260,28 @@ async function processUpdate(req, res, signal) {
         // Check if cancelled
         if (signal.aborted) {
             logger.warning('Request cancelled before starting');
-            return res.status(499).json({ success: false, message: 'Request cancelled' });
+            throw new Error('Request cancelled');
         }
+
+        updateProgress.progress = 0.05;
+        updateProgress.progress_message = 'Initializing files folder...';
 
         // Ensure files folder exists
         const filesPath = await ensureFilesFolder();
 
         // Prepare all language repos (but NOT english)
         logger.subheader('Preparing Git Repositories');
+        updateProgress.progress = 0.1;
+        updateProgress.progress_message = 'Preparing git repositories...';
+
         const languagesPath = path.join(filesPath, 'languages');
 
-        for (const language of LANGUAGES) {
+        for (let i = 0; i < LANGUAGES.length; i++) {
+            const language = LANGUAGES[i];
             const langPath = path.join(languagesPath, language);
+            updateProgress.progress = 0.1 + (0.1 * i / LANGUAGES.length);
+            updateProgress.progress_message = `Preparing ${language} repository...`;
+
             try {
                 const resetSpinner = logger.startSpinner(`git-reset-${language}`, `Discarding unstaged changes in ${language}...`);
                 await execPromise('git checkout -- .', { cwd: langPath });
@@ -230,13 +295,16 @@ async function processUpdate(req, res, signal) {
         // Check if cancelled after git operations
         if (signal.aborted) {
             logger.warning('Request cancelled after git reset');
-            return res.status(499).json({ success: false, message: 'Request cancelled' });
+            throw new Error('Request cancelled');
         }
 
         const englishPath = path.join(filesPath, 'english');
 
         // Read english files once
         logger.subheader('Reading English source files');
+        updateProgress.progress = 0.2;
+        updateProgress.progress_message = 'Reading English specification files...';
+
         const englishFiles = await readFilesFromDirectory(englishPath);
         const englishString = concatenateFiles(englishFiles);
         logger.success(`Loaded ${Object.keys(englishFiles).length} English files`);
@@ -251,15 +319,16 @@ async function processUpdate(req, res, signal) {
                 logger.warning('Request cancelled during language processing');
                 // Revert any processed languages
                 await revertProcessedLanguages(processedLanguages, languagesPath);
-                return res.status(499).json({
-                    success: false,
-                    message: 'Request cancelled',
-                    processed: i,
-                    total: LANGUAGES.length
-                });
+                throw new Error('Request cancelled');
             }
 
             const language = LANGUAGES[i];
+            // Update progress: 0.25 to 0.8 for language processing
+            const baseProgress = 0.25;
+            const languageProgressRange = 0.55;
+            updateProgress.progress = baseProgress + (languageProgressRange * i / LANGUAGES.length);
+            updateProgress.progress_message = `Processing ${language} (${i + 1}/${LANGUAGES.length})...`;
+
             logger.progressBar(i, LANGUAGES.length, `Processing ${language}...`);
             const languagePath = path.join(languagesPath, language);
 
@@ -271,6 +340,7 @@ async function processUpdate(req, res, signal) {
 
             // Call algo function (now async) - this cannot be cancelled mid-execution
             logger.updateSpinner(`lang-${language}`, `Running algorithm for ${language}...`);
+            updateProgress.progress_message = `Running AI algorithm for ${language}...`;
             const result = await algo(language, englishString, oldLanguageString);
 
             // Check if cancelled after algo execution
@@ -279,12 +349,7 @@ async function processUpdate(req, res, signal) {
                 logger.warning('Request cancelled after algorithm execution');
                 // Revert any processed languages
                 await revertProcessedLanguages(processedLanguages, languagesPath);
-                return res.status(499).json({
-                    success: false,
-                    message: 'Request cancelled',
-                    processed: i,
-                    total: LANGUAGES.length
-                });
+                throw new Error('Request cancelled');
             }
 
             // Write result files to language folder
@@ -313,8 +378,13 @@ async function processUpdate(req, res, signal) {
         // Stage all changes unless cancelled (including English)
         if (!signal.aborted) {
             logger.subheader('Staging Changes');
+            updateProgress.progress = 0.8;
+            updateProgress.progress_message = 'Staging all changes...';
 
             // Stage English changes
+            updateProgress.progress = 0.85;
+            updateProgress.progress_message = 'Staging English changes...';
+
             try {
                 const englishSpinner = logger.startSpinner('git-stage-english', 'Staging English changes...');
                 await execPromise('git add -A', { cwd: englishPath });
@@ -324,7 +394,10 @@ async function processUpdate(req, res, signal) {
             }
 
             // Stage all language changes
-            for (const language of LANGUAGES) {
+            for (let i = 0; i < LANGUAGES.length; i++) {
+                const language = LANGUAGES[i];
+                updateProgress.progress = 0.85 + (0.1 * i / LANGUAGES.length);
+                updateProgress.progress_message = `Staging ${language} changes...`;
                 const langPath = path.join(languagesPath, language);
                 try {
                     const stageSpinner = logger.startSpinner(`git-stage-${language}`, `Staging ${language} changes...`);
@@ -338,6 +411,9 @@ async function processUpdate(req, res, signal) {
             // Commit English changes automatically
             try {
                 logger.subheader('Committing English Changes');
+                updateProgress.progress = 0.95;
+                updateProgress.progress_message = 'Committing English changes...';
+
                 const commitSpinner = logger.startSpinner('git-commit-english', 'Committing English changes...');
                 const statusResult = await execPromise('git diff --cached --name-only', { cwd: englishPath });
 
@@ -370,13 +446,16 @@ async function processUpdate(req, res, signal) {
         ]);
         logger.table(summaryData, ['Language', 'Status', 'Time']);
 
-        res.json({
+        updateProgress.progress = 1;
+        updateProgress.progress_message = `Update completed successfully in ${totalTime}ms`;
+
+        return {
             success: true,
             message: 'Language files updated successfully',
             languages: LANGUAGES,
             processedLanguages,
             processingTime: `${totalTime}ms`
-        });
+        };
 
     } catch (error) {
         // Check if it's a cancellation
@@ -385,23 +464,11 @@ async function processUpdate(req, res, signal) {
             // Revert any processed languages
             const languagesPath = path.join(__dirname, '..', 'files', 'languages');
             await revertProcessedLanguages(processedLanguages, languagesPath);
-
-            if (!res.headersSent) {
-                res.status(499).json({
-                    success: false,
-                    message: 'Request cancelled'
-                });
-            }
+            throw new Error('Request cancelled');
         } else {
             logger.error('❌ Error processing update:', error.message);
             logger.debug('Stack trace:', error.stack);
-
-            if (!res.headersSent) {
-                res.status(500).json({
-                    success: false,
-                    error: error.message
-                });
-            }
+            throw error;
         }
     } finally {
         // Cleanup any remaining spinners
@@ -634,6 +701,7 @@ app.listen(PORT, () => {
     console.log('');
     logger.info(`📍 Endpoints:`);
     logger.info(`   - POST http://localhost:${PORT}/update`);
+    logger.info(`   - GET  http://localhost:${PORT}/progress`);
     logger.info(`   - POST http://localhost:${PORT}/approve`);
     logger.info(`   - POST http://localhost:${PORT}/reject`);
     console.log('');

@@ -49,10 +49,11 @@ Output format (MUST be valid JSON):
         logger.debug(`Calling GPT-5 for ${language}...`);
 
         const result = await openai.responses.create({
-            model: "gpt-5",
+            model: "gpt-5-mini",
             input: prompt,
             reasoning: { effort: "medium" },
-            text: { verbosity: "low" }
+            text: { verbosity: "low" },
+            response_format: { type: 'json_object' },
         });
 
         const outputText = result.output_text;

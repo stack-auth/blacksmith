@@ -1,0 +1,8 @@
+{
+  "name": "blacksmith-root",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "pro-sdk"
+  ]
+}

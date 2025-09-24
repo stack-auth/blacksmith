@@ -1,4 +1,5 @@
 const express = require('express');
+const cors = require('cors');
 const fs = require('fs-extra');
 const path = require('path');
 const { exec } = require('child_process');
@@ -8,6 +9,15 @@ const { algo } = require('./algo');
 const logger = require('./logger');
 
 const app = express();
+
+// Enable CORS for all cross-origin requests
+app.use(cors({
+    origin: '*',
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: '*',
+    credentials: true
+}));
+
 app.use(express.json());
 
 // Logging middleware
@@ -43,6 +53,29 @@ const LANGUAGES = [
     'kotlin'
 ];
 
+// Helper function to initialize git repo if needed
+async function ensureGitRepo(repoPath, description) {
+    if (!await fs.pathExists(path.join(repoPath, '.git'))) {
+        logger.info(`Initializing git repository for ${description}...`);
+        await execPromise('git init', { cwd: repoPath });
+        await execPromise('git config user.email "bot@example.com"', { cwd: repoPath });
+        await execPromise('git config user.name "Bot"', { cwd: repoPath });
+
+        // Make initial commit if there are files
+        try {
+            const files = await fs.readdir(repoPath);
+            if (files.length > 0) {
+                await execPromise('git add -A', { cwd: repoPath });
+                await execPromise(`git commit -m "Initial commit for ${description}"`, { cwd: repoPath });
+            }
+        } catch (e) {
+            // Ignore if no files to commit
+        }
+
+        logger.success(`Git repository initialized for ${description}`);
+    }
+}
+
 async function ensureFilesFolder() {
     const filesPath = path.join(__dirname, '..', 'files');
     const defaultFilesPath = path.join(__dirname, '..', 'default-files');
@@ -62,20 +95,24 @@ async function ensureFilesFolder() {
             await fs.ensureDir(filesPath);
             logger.success('Empty files folder created');
         }
-
-        // Initialize git repository in files folder
-        const gitSpinner = logger.startSpinner('git', 'Initializing git repository...');
-        try {
-            await execPromise('git init', { cwd: filesPath });
-            await execPromise('git config user.email "bot@example.com"', { cwd: filesPath });
-            await execPromise('git config user.name "Bot"', { cwd: filesPath });
-            logger.succeedSpinner('git', 'Git repository initialized');
-        } catch (error) {
-            logger.failSpinner('git', 'Failed to initialize git repository');
-            throw error;
-        }
     } else {
         logger.success('Files folder exists');
+    }
+
+    // Ensure english folder and its git repo
+    const englishPath = path.join(filesPath, 'english');
+    await fs.ensureDir(englishPath);
+    await ensureGitRepo(englishPath, 'English');
+
+    // Ensure languages folder
+    const languagesPath = path.join(filesPath, 'languages');
+    await fs.ensureDir(languagesPath);
+
+    // Ensure each language has its own git repo
+    for (const language of LANGUAGES) {
+        const langPath = path.join(languagesPath, language);
+        await fs.ensureDir(langPath);
+        await ensureGitRepo(langPath, language);
     }
 
     return filesPath;
@@ -89,6 +126,9 @@ async function readFilesFromDirectory(dirPath) {
         const files = await fs.readdir(dirPath);
 
         for (const file of files) {
+            // Skip .git directory
+            if (file === '.git') continue;
+
             const filePath = path.join(dirPath, file);
             const stat = await fs.stat(filePath);
 
@@ -156,6 +196,8 @@ app.post('/update', async (req, res) => {
 });
 
 async function processUpdate(req, res, signal) {
+    const processedLanguages = [];
+
     try {
         logger.header('Processing Language Update Request');
         const startTime = Date.now();
@@ -169,15 +211,20 @@ async function processUpdate(req, res, signal) {
         // Ensure files folder exists
         const filesPath = await ensureFilesFolder();
 
-        // Discard all unstaged changes at the beginning
-        logger.subheader('Preparing Git Repository');
-        try {
-            const resetSpinner = logger.startSpinner('git-reset', 'Discarding unstaged changes...');
-            await execPromise('git checkout -- .', { cwd: filesPath });
-            await execPromise('git clean -fd', { cwd: filesPath });
-            logger.succeedSpinner('git-reset', 'Repository cleaned - unstaged changes discarded');
-        } catch (error) {
-            logger.warning('Could not reset repository:', error.message);
+        // Prepare all language repos (but NOT english)
+        logger.subheader('Preparing Git Repositories');
+        const languagesPath = path.join(filesPath, 'languages');
+
+        for (const language of LANGUAGES) {
+            const langPath = path.join(languagesPath, language);
+            try {
+                const resetSpinner = logger.startSpinner(`git-reset-${language}`, `Discarding unstaged changes in ${language}...`);
+                await execPromise('git checkout -- .', { cwd: langPath });
+                await execPromise('git clean -fd', { cwd: langPath });
+                logger.succeedSpinner(`git-reset-${language}`, `${language} repository cleaned`);
+            } catch (error) {
+                logger.warning(`Could not reset ${language} repository:`, error.message);
+            }
         }
 
         // Check if cancelled after git operations
@@ -187,7 +234,6 @@ async function processUpdate(req, res, signal) {
         }
 
         const englishPath = path.join(filesPath, 'english');
-        const languagesPath = path.join(filesPath, 'languages');
 
         // Read english files once
         logger.subheader('Reading English source files');
@@ -203,6 +249,8 @@ async function processUpdate(req, res, signal) {
             // Check if cancelled before processing each language
             if (signal.aborted) {
                 logger.warning('Request cancelled during language processing');
+                // Revert any processed languages
+                await revertProcessedLanguages(processedLanguages, languagesPath);
                 return res.status(499).json({
                     success: false,
                     message: 'Request cancelled',
@@ -229,6 +277,8 @@ async function processUpdate(req, res, signal) {
             if (signal.aborted) {
                 logger.stopSpinner(`lang-${language}`);
                 logger.warning('Request cancelled after algorithm execution');
+                // Revert any processed languages
+                await revertProcessedLanguages(processedLanguages, languagesPath);
                 return res.status(499).json({
                     success: false,
                     message: 'Request cancelled',
@@ -239,9 +289,6 @@ async function processUpdate(req, res, signal) {
 
             // Write result files to language folder
             if (result && typeof result === 'object') {
-                // Ensure language directory exists
-                await fs.ensureDir(languagePath);
-
                 logger.updateSpinner(`lang-${language}`, `Writing ${Object.keys(result).length} files for ${language}...`);
 
                 for (const [filename, content] of Object.entries(result)) {
@@ -250,6 +297,7 @@ async function processUpdate(req, res, signal) {
                     logger.fileOperation('write', filename, `to ${language}`);
                 }
 
+                processedLanguages.push(language);
                 logger.succeedSpinner(`lang-${language}`, `${language} completed - ${Object.keys(result).length} files written`);
                 console.log('');
                 logger.language(language, 'completed');
@@ -262,18 +310,48 @@ async function processUpdate(req, res, signal) {
         console.log('');
         logger.progressBar(LANGUAGES.length, LANGUAGES.length, 'All languages processed!');
 
-        // Stage all changes unless cancelled
+        // Stage all changes unless cancelled (including English)
         if (!signal.aborted) {
             logger.subheader('Staging Changes');
-            const stageSpinner = logger.startSpinner('git-stage', 'Staging all changes...');
+
+            // Stage English changes
             try {
-                await execPromise('git add -A', { cwd: filesPath });
-                logger.gitOperation('git add -A', true);
-                logger.succeedSpinner('git-stage', 'All changes staged successfully');
+                const englishSpinner = logger.startSpinner('git-stage-english', 'Staging English changes...');
+                await execPromise('git add -A', { cwd: englishPath });
+                logger.succeedSpinner('git-stage-english', 'English changes staged');
             } catch (error) {
-                logger.failSpinner('git-stage', 'Failed to stage changes');
-                logger.error('Staging error:', error.message);
+                logger.error('Failed to stage English changes:', error.message);
             }
+
+            // Stage all language changes
+            for (const language of LANGUAGES) {
+                const langPath = path.join(languagesPath, language);
+                try {
+                    const stageSpinner = logger.startSpinner(`git-stage-${language}`, `Staging ${language} changes...`);
+                    await execPromise('git add -A', { cwd: langPath });
+                    logger.succeedSpinner(`git-stage-${language}`, `${language} changes staged`);
+                } catch (error) {
+                    logger.error(`Failed to stage ${language} changes:`, error.message);
+                }
+            }
+
+            // Commit English changes automatically
+            try {
+                logger.subheader('Committing English Changes');
+                const commitSpinner = logger.startSpinner('git-commit-english', 'Committing English changes...');
+                const statusResult = await execPromise('git diff --cached --name-only', { cwd: englishPath });
+
+                if (statusResult.stdout.trim().length > 0) {
+                    await execPromise(`git commit -m "Update English specification"`, { cwd: englishPath });
+                    logger.succeedSpinner('git-commit-english', 'English changes committed');
+                } else {
+                    logger.warnSpinner('git-commit-english', 'No English changes to commit');
+                }
+            } catch (error) {
+                logger.error('Failed to commit English changes:', error.message);
+            }
+
+            logger.success('All changes staged successfully');
         } else {
             logger.warning('Skipping staging due to cancellation');
         }
@@ -287,7 +365,7 @@ async function processUpdate(req, res, signal) {
         logger.subheader('Summary');
         const summaryData = LANGUAGES.map(lang => [
             lang,
-            '✅ Processed',
+            processedLanguages.includes(lang) ? '✅ Processed' : '⏭️ Skipped',
             `${totalTime}ms`
         ]);
         logger.table(summaryData, ['Language', 'Status', 'Time']);
@@ -296,6 +374,7 @@ async function processUpdate(req, res, signal) {
             success: true,
             message: 'Language files updated successfully',
             languages: LANGUAGES,
+            processedLanguages,
             processingTime: `${totalTime}ms`
         });
 
@@ -303,6 +382,10 @@ async function processUpdate(req, res, signal) {
         // Check if it's a cancellation
         if (error.name === 'AbortError' || (signal && signal.aborted)) {
             logger.warning('Update request was cancelled');
+            // Revert any processed languages
+            const languagesPath = path.join(__dirname, '..', 'files', 'languages');
+            await revertProcessedLanguages(processedLanguages, languagesPath);
+
             if (!res.headersSent) {
                 res.status(499).json({
                     success: false,
@@ -324,106 +407,218 @@ async function processUpdate(req, res, signal) {
         // Cleanup any remaining spinners
         for (const language of LANGUAGES) {
             logger.stopSpinner(`lang-${language}`);
+            logger.stopSpinner(`git-reset-${language}`);
+            logger.stopSpinner(`git-stage-${language}`);
         }
-        logger.stopSpinner('git-reset');
-        logger.stopSpinner('git-stage');
+        logger.stopSpinner('git-stage-english');
+        logger.stopSpinner('git-commit-english');
     }
 }
 
-// POST /commit endpoint - commits changes to git
-app.post('/commit', async (req, res) => {
+// Helper to revert processed languages on cancellation
+async function revertProcessedLanguages(processedLanguages, languagesPath) {
+    for (const language of processedLanguages) {
+        const langPath = path.join(languagesPath, language);
+        try {
+            await execPromise('git checkout -- .', { cwd: langPath });
+            await execPromise('git clean -fd', { cwd: langPath });
+            logger.info(`Reverted changes in ${language} due to cancellation`);
+        } catch (e) {
+            logger.error(`Failed to revert ${language}:`, e.message);
+        }
+    }
+}
+
+// POST /approve endpoint - approves and commits changes for a specific language
+app.post('/approve', async (req, res) => {
     try {
-        logger.header('Processing Git Commit Request');
+        const { language } = req.body;
+
+        if (!language) {
+            return res.status(400).json({
+                success: false,
+                error: 'Language parameter is required'
+            });
+        }
+
+        if (!LANGUAGES.includes(language)) {
+            return res.status(400).json({
+                success: false,
+                error: `Invalid language. Must be one of: ${LANGUAGES.join(', ')}`
+            });
+        }
+
+        logger.header(`Approving ${language} Changes`);
         const startTime = Date.now();
 
-        // Get the files path
-        const filesPath = path.join(__dirname, '..', 'files');
+        const langPath = path.join(__dirname, '..', 'files', 'languages', language);
 
-        // Check if files folder exists
-        if (!await fs.pathExists(filesPath)) {
-            logger.error('Files folder does not exist');
+        // Check if language folder exists
+        if (!await fs.pathExists(langPath)) {
+            logger.error(`Language folder does not exist for ${language}`);
             return res.status(400).json({
                 success: false,
-                error: 'Files folder does not exist. Run /update first.'
+                error: `Language folder does not exist for ${language}. Run /update first.`
             });
         }
 
-        // Check if it's a git repository
+        // Discard unstaged changes first
         try {
-            await execPromise('git status', { cwd: filesPath });
+            const cleanSpinner = logger.startSpinner('git-clean', `Discarding unstaged changes in ${language}...`);
+            await execPromise('git checkout -- .', { cwd: langPath });
+            logger.succeedSpinner('git-clean', 'Unstaged changes discarded');
         } catch (error) {
-            logger.error('Files folder is not a git repository');
-            return res.status(400).json({
-                success: false,
-                error: 'Files folder is not a git repository'
-            });
+            logger.warning('Could not discard unstaged changes:', error.message);
         }
 
-        // Git commit inside files folder
         logger.subheader('Committing Changes');
-        const gitSpinner = logger.startSpinner('commit', 'Checking for changes...');
+        const gitSpinner = logger.startSpinner('commit', `Checking for staged changes in ${language}...`);
 
         try {
-            // Check for changes
-            const statusResult = await execPromise('git status --porcelain', { cwd: filesPath });
-            const hasChanges = statusResult.stdout.trim().length > 0;
+            // Check for staged changes
+            const statusResult = await execPromise('git diff --cached --name-only', { cwd: langPath });
+            const hasStagedChanges = statusResult.stdout.trim().length > 0;
 
-            if (hasChanges) {
-                logger.updateSpinner('commit', 'Staging changes...');
-                await execPromise('git add -A', { cwd: filesPath });
-                logger.gitOperation('git add -A', true);
-
-                logger.updateSpinner('commit', 'Committing changes...');
-                const commitMessage = req.body.message || 'Update language files';
-                await execPromise(`git commit -m "${commitMessage}"`, { cwd: filesPath });
+            if (hasStagedChanges) {
+                logger.updateSpinner('commit', `Committing staged changes for ${language}...`);
+                const commitMessage = req.body.message || `Approve ${language} implementation`;
+                await execPromise(`git commit -m "${commitMessage}"`, { cwd: langPath });
                 logger.gitOperation(`git commit -m "${commitMessage}"`, true);
-                logger.succeedSpinner('commit', 'Changes committed successfully');
+                logger.succeedSpinner('commit', `${language} changes approved and committed`);
+
+                // Get commit info
+                const lastCommit = await execPromise('git log -1 --oneline', { cwd: langPath });
+                const totalTime = Date.now() - startTime;
+
+                logger.separator();
+                logger.success(`✨ ${language} approved in ${logger.highlight(totalTime + 'ms')}`);
+                logger.info(`Last commit: ${lastCommit.stdout.trim()}`);
+                logger.separator();
+
+                res.json({
+                    success: true,
+                    message: `${language} changes approved and committed`,
+                    language,
+                    lastCommit: lastCommit.stdout.trim(),
+                    processingTime: `${totalTime}ms`
+                });
             } else {
-                // Create empty commit if requested
-                if (req.body.allowEmpty) {
-                    logger.updateSpinner('commit', 'No changes detected, creating empty commit...');
-                    const commitMessage = req.body.message || 'Update language files (no changes)';
-                    await execPromise(`git commit --allow-empty -m "${commitMessage}"`, { cwd: filesPath });
-                    logger.gitOperation(`git commit --allow-empty -m "${commitMessage}"`, true);
-                    logger.succeedSpinner('commit', 'Empty commit created successfully');
-                } else {
-                    logger.warnSpinner('commit', 'No changes to commit');
-                    const totalTime = Date.now() - startTime;
+                logger.warnSpinner('commit', `No staged changes to approve for ${language}`);
+                const totalTime = Date.now() - startTime;
 
-                    return res.json({
-                        success: true,
-                        message: 'No changes to commit',
-                        hasChanges: false,
-                        processingTime: `${totalTime}ms`
-                    });
-                }
+                res.json({
+                    success: true,
+                    message: `No staged changes to approve for ${language}`,
+                    language,
+                    hasChanges: false,
+                    processingTime: `${totalTime}ms`
+                });
             }
-
-            // Get commit info
-            const lastCommit = await execPromise('git log -1 --oneline', { cwd: filesPath });
-            const totalTime = Date.now() - startTime;
-
-            logger.separator();
-            logger.success(`✨ Commit completed in ${logger.highlight(totalTime + 'ms')}`);
-            logger.info(`Last commit: ${lastCommit.stdout.trim()}`);
-            logger.separator();
-
-            res.json({
-                success: true,
-                message: 'Changes committed successfully',
-                hasChanges: hasChanges,
-                lastCommit: lastCommit.stdout.trim(),
-                processingTime: `${totalTime}ms`
-            });
-
         } catch (error) {
-            logger.failSpinner('commit', 'Failed to commit changes');
+            logger.failSpinner('commit', `Failed to approve ${language} changes`);
             logger.gitOperation('git commit', false);
             throw error;
         }
 
     } catch (error) {
-        logger.error('❌ Error processing commit:', error.message);
+        logger.error('❌ Error processing approval:', error.message);
+        logger.debug('Stack trace:', error.stack);
+
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// POST /reject endpoint - rejects and reverts staged changes for a specific language
+app.post('/reject', async (req, res) => {
+    try {
+        const { language } = req.body;
+
+        if (!language) {
+            return res.status(400).json({
+                success: false,
+                error: 'Language parameter is required'
+            });
+        }
+
+        if (!LANGUAGES.includes(language)) {
+            return res.status(400).json({
+                success: false,
+                error: `Invalid language. Must be one of: ${LANGUAGES.join(', ')}`
+            });
+        }
+
+        logger.header(`Rejecting ${language} Changes`);
+        const startTime = Date.now();
+
+        const langPath = path.join(__dirname, '..', 'files', 'languages', language);
+
+        // Check if language folder exists
+        if (!await fs.pathExists(langPath)) {
+            logger.error(`Language folder does not exist for ${language}`);
+            return res.status(400).json({
+                success: false,
+                error: `Language folder does not exist for ${language}. Run /update first.`
+            });
+        }
+
+        logger.subheader('Reverting Changes');
+
+        try {
+            // Check for staged changes
+            const statusResult = await execPromise('git diff --cached --name-only', { cwd: langPath });
+            const hasStagedChanges = statusResult.stdout.trim().length > 0;
+
+            if (hasStagedChanges) {
+                const revertSpinner = logger.startSpinner('revert', `Reverting staged changes for ${language}...`);
+
+                // Reset staged changes
+                await execPromise('git reset HEAD', { cwd: langPath });
+                logger.gitOperation('git reset HEAD', true);
+
+                // Discard the changes
+                await execPromise('git checkout -- .', { cwd: langPath });
+                logger.gitOperation('git checkout -- .', true);
+
+                // Clean untracked files
+                await execPromise('git clean -fd', { cwd: langPath });
+                logger.gitOperation('git clean -fd', true);
+
+                logger.succeedSpinner('revert', `${language} changes rejected and reverted`);
+
+                const totalTime = Date.now() - startTime;
+
+                logger.separator();
+                logger.success(`✨ ${language} changes rejected in ${logger.highlight(totalTime + 'ms')}`);
+                logger.separator();
+
+                res.json({
+                    success: true,
+                    message: `${language} changes rejected and reverted`,
+                    language,
+                    processingTime: `${totalTime}ms`
+                });
+            } else {
+                logger.info(`No staged changes to reject for ${language}`);
+                const totalTime = Date.now() - startTime;
+
+                res.json({
+                    success: true,
+                    message: `No staged changes to reject for ${language}`,
+                    language,
+                    hasChanges: false,
+                    processingTime: `${totalTime}ms`
+                });
+            }
+        } catch (error) {
+            logger.error(`Failed to reject ${language} changes:`, error.message);
+            throw error;
+        }
+
+    } catch (error) {
+        logger.error('❌ Error processing rejection:', error.message);
         logger.debug('Stack trace:', error.stack);
 
         res.status(500).json({
@@ -439,7 +634,8 @@ app.listen(PORT, () => {
     console.log('');
     logger.info(`📍 Endpoints:`);
     logger.info(`   - POST http://localhost:${PORT}/update`);
-    logger.info(`   - POST http://localhost:${PORT}/commit`);
+    logger.info(`   - POST http://localhost:${PORT}/approve`);
+    logger.info(`   - POST http://localhost:${PORT}/reject`);
     console.log('');
     logger.info(`📂 Working directory: ${logger.dim(process.cwd())}`);
     logger.separator();

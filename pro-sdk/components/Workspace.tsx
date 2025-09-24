@@ -5,18 +5,21 @@ import clsx from 'clsx';
 import {
   ArrowUpRight,
   Check,
+  CheckCircle2,
   ChevronRight,
+  Clock3,
   Loader2,
   RefreshCw,
   X
 } from 'lucide-react';
 import { approveLanguage, rejectLanguage, updateEnglish } from '@/app/actions';
 import { getLanguageVisual } from '@/lib/languageMeta';
+import type { FileEntry, LanguageWithStatus } from '@/lib/fileSystem';
 
 export interface WorkspaceProps {
-  languages: Array<{ id: string; label: string }>;
+  languages: LanguageWithStatus[];
   initialLanguage: string;
-  initialFiles: string[];
+  initialFiles: FileEntry[];
   initialFilePath: string | null;
   initialContent: string;
 }
@@ -26,6 +29,19 @@ interface BannerState {
   message: string;
 }
 
+interface ProgressState {
+  value: number;
+  message: string;
+}
+
+interface FilesResponse {
+  files: FileEntry[];
+  languageStatus: {
+    hasStagedChanges: boolean;
+    hasUnstagedChanges: boolean;
+  };
+}
+
 export function Workspace({
   languages,
   initialLanguage,
@@ -33,23 +49,32 @@ export function Workspace({
   initialFilePath,
   initialContent
 }: WorkspaceProps) {
+  const [languageList, setLanguageList] = useState(languages);
   const [currentLanguage, setCurrentLanguage] = useState(initialLanguage);
-  const [files, setFiles] = useState(initialFiles);
+  const [files, setFiles] = useState<FileEntry[]>(initialFiles);
   const [activeFile, setActiveFile] = useState<string | null>(initialFilePath);
   const [content, setContent] = useState(initialContent);
   const [loadingFiles, setLoadingFiles] = useState(false);
   const [loadingContent, setLoadingContent] = useState(false);
   const [banner, setBanner] = useState<BannerState | null>(null);
   const [actionPending, startAction] = useTransition();
+  const [progress, setProgress] = useState<ProgressState | null>(null);
+  const [updateRunning, setUpdateRunning] = useState(false);
   const skippedInitialLoad = useRef(false);
+  const progressIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const progressCompletionHandled = useRef(false);
+  const progressDismissTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  const fetchFiles = useCallback(async (language: string) => {
+  const fetchFiles = useCallback(async (language: string): Promise<FilesResponse> => {
     setLoadingFiles(true);
     try {
       const response = await fetch(`/api/files?language=${language}`, { cache: 'no-store' });
       const payload = await response.json();
       if (response.ok) {
-        return payload.files as string[];
+        return {
+          files: payload.files as FileEntry[],
+          languageStatus: payload.languageStatus as FilesResponse['languageStatus']
+        };
       }
       throw new Error(payload.error as string);
     } finally {
@@ -73,17 +98,133 @@ export function Workspace({
     }
   }, []);
 
+  const updateLanguageStatus = useCallback(
+    (languageId: string, status: FilesResponse['languageStatus']) => {
+      setLanguageList((current) =>
+        current.map((language) =>
+          language.id === languageId
+            ? {
+                ...language,
+                hasStagedChanges: status.hasStagedChanges,
+                hasUnstagedChanges: status.hasUnstagedChanges
+              }
+            : language
+        )
+      );
+    },
+    []
+  );
+
+  const refreshLanguages = useCallback(async () => {
+    const response = await fetch('/api/languages', { cache: 'no-store' });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error as string);
+    }
+    setLanguageList(payload.languages as LanguageWithStatus[]);
+  }, []);
+
+  const refreshCurrentLanguage = useCallback(
+    async ({ preserveActive = false }: { preserveActive?: boolean } = {}) => {
+      const { files: nextFiles, languageStatus } = await fetchFiles(currentLanguage);
+      setFiles(nextFiles);
+      updateLanguageStatus(currentLanguage, languageStatus);
+
+      let nextActive = nextFiles[0]?.path ?? null;
+      if (preserveActive && activeFile) {
+        const stillPresent = nextFiles.find((file) => file.path === activeFile);
+        if (stillPresent) {
+          nextActive = activeFile;
+        }
+      }
+
+      setActiveFile(nextActive);
+
+      if (nextActive) {
+        const nextContent = await fetchContent(currentLanguage, nextActive);
+        setContent(nextContent);
+      } else {
+        setContent('');
+      }
+    },
+    [activeFile, currentLanguage, fetchContent, fetchFiles, updateLanguageStatus]
+  );
+
+  const stopProgressPolling = useCallback(() => {
+    if (progressIntervalRef.current) {
+      clearInterval(progressIntervalRef.current);
+      progressIntervalRef.current = null;
+    }
+  }, []);
+
+  const clearProgressDismissTimer = useCallback(() => {
+    if (progressDismissTimeoutRef.current) {
+      clearTimeout(progressDismissTimeoutRef.current);
+      progressDismissTimeoutRef.current = null;
+    }
+  }, []);
+
+  const pollProgress = useCallback(async () => {
+    try {
+      const response = await fetch('/api/progress', { cache: 'no-store' });
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload.error as string);
+      }
+
+      const rawValue = Number(payload.progress ?? 0);
+      const value = Number.isFinite(rawValue) ? rawValue : 0;
+      const clampedValue = Math.min(1, Math.max(0, value));
+      const message = typeof payload.progress_message === 'string' ? payload.progress_message : '';
+
+      setProgress({ value: clampedValue, message });
+
+      if (clampedValue >= 1 && !progressCompletionHandled.current) {
+        progressCompletionHandled.current = true;
+        stopProgressPolling();
+        await Promise.all([
+          refreshLanguages(),
+          refreshCurrentLanguage({ preserveActive: true })
+        ]);
+        setUpdateRunning(false);
+        setBanner({ type: 'success', message: 'English specification refreshed' });
+        clearProgressDismissTimer();
+        progressDismissTimeoutRef.current = setTimeout(() => {
+          setProgress(null);
+          progressDismissTimeoutRef.current = null;
+        }, 1500);
+      }
+    } catch (error) {
+      console.error('Failed to fetch progress', error);
+      setProgress((prev) => prev ?? { value: 0, message: 'Waiting for progress...' });
+    }
+  }, [clearProgressDismissTimer, refreshCurrentLanguage, refreshLanguages, stopProgressPolling]);
+
+  const startProgressPolling = useCallback(() => {
+    progressCompletionHandled.current = false;
+    stopProgressPolling();
+    clearProgressDismissTimer();
+    setProgress({ value: 0, message: 'Initializing update…' });
+    void pollProgress();
+    progressIntervalRef.current = setInterval(() => {
+      void pollProgress();
+    }, 5000);
+  }, [clearProgressDismissTimer, pollProgress, stopProgressPolling]);
+
   useEffect(() => {
     let cancelled = false;
 
     async function run() {
       if (!currentLanguage) return;
       try {
-        const nextFiles = await fetchFiles(currentLanguage);
+        const { files: nextFiles, languageStatus } = await fetchFiles(currentLanguage);
         if (cancelled) return;
 
         setFiles(nextFiles);
-        const nextFile = nextFiles[0] ?? null;
+        updateLanguageStatus(currentLanguage, languageStatus);
+
+        const nextFile = nextFiles[0]?.path ?? null;
         setActiveFile(nextFile);
 
         if (nextFile) {
@@ -114,11 +255,20 @@ export function Workspace({
     return () => {
       cancelled = true;
     };
-  }, [currentLanguage, fetchContent, fetchFiles, initialLanguage]);
+  }, [currentLanguage, fetchContent, fetchFiles, initialLanguage, updateLanguageStatus]);
 
-  const handleSelectLanguage = async (language: string) => {
+  useEffect(() => {
+    return () => {
+      stopProgressPolling();
+      clearProgressDismissTimer();
+    };
+  }, [clearProgressDismissTimer, stopProgressPolling]);
+
+  const handleSelectLanguage = (language: string) => {
     if (language === currentLanguage) return;
     setCurrentLanguage(language);
+    setActiveFile(null);
+    setContent('');
     setBanner(null);
   };
 
@@ -146,19 +296,8 @@ export function Workspace({
 
         if (refresh) {
           try {
-            const updatedFiles = await fetchFiles(currentLanguage);
-            setFiles(updatedFiles);
-            const nextFile = activeFile && updatedFiles.includes(activeFile)
-              ? activeFile
-              : updatedFiles[0] ?? null;
-            setActiveFile(nextFile);
-
-            if (nextFile) {
-              const updatedContent = await fetchContent(currentLanguage, nextFile);
-              setContent(updatedContent);
-            } else {
-              setContent('');
-            }
+            await refreshCurrentLanguage({ preserveActive: true });
+            await refreshLanguages();
           } catch (refreshError) {
             setBanner({ type: 'error', message: (refreshError as Error).message });
             return;
@@ -185,7 +324,21 @@ export function Workspace({
   };
 
   const update = () => {
-    runAction(() => updateEnglish(), 'English specification refreshed', { refresh: true });
+    if (updateRunning) return;
+    setBanner(null);
+    startAction(async () => {
+      try {
+        setUpdateRunning(true);
+        startProgressPolling();
+        await updateEnglish();
+      } catch (error) {
+        stopProgressPolling();
+        clearProgressDismissTimer();
+        setProgress(null);
+        setUpdateRunning(false);
+        setBanner({ type: 'error', message: (error as Error).message });
+      }
+    });
   };
 
   return (
@@ -195,19 +348,35 @@ export function Workspace({
           <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">Locales</p>
         </header>
         <nav className="flex-1 space-y-1 overflow-y-auto px-2 pb-4">
-          {languages.map((language) => {
+          {languageList.map((language) => {
             const isActive = language.id === currentLanguage;
             const { icon: Icon, accent } = getLanguageVisual(language.id);
+            const pendingReview = language.hasStagedChanges && !language.hasUnstagedChanges;
+
+            const statusIcon = pendingReview ? (
+              <Clock3 className="h-3.5 w-3.5 text-orange-300" />
+            ) : (
+              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
+            );
+
+            const labelClasses = clsx(
+              'text-sm',
+              pendingReview ? 'font-semibold text-orange-200' : 'font-medium text-slate-300'
+            );
+
+            const buttonClasses = clsx(
+              'group flex w-full items-center justify-between rounded-md border border-transparent px-3 py-2 text-left transition duration-150',
+              isActive
+                ? 'border-accent-soft/40 bg-accent-soft/20 text-white shadow-glow'
+                : pendingReview
+                ? 'border-orange-500/40 bg-orange-500/10 text-orange-200 hover:border-orange-400/60 hover:bg-orange-500/20'
+                : 'text-slate-300 hover:border-accent-soft/30 hover:bg-panel-light/50'
+            );
 
             return (
               <button
                 key={language.id}
-                className={clsx(
-                  'group flex w-full items-center justify-between rounded-md border border-transparent px-3 py-2 text-left transition duration-150',
-                  isActive
-                    ? 'border-accent-soft/40 bg-accent-soft/20 text-white shadow-glow'
-                    : 'text-slate-300 hover:border-accent-soft/30 hover:bg-panel-light/50'
-                )}
+                className={buttonClasses}
                 onClick={() => handleSelectLanguage(language.id)}
               >
                 <span className="flex items-center gap-3">
@@ -217,9 +386,12 @@ export function Workspace({
                   >
                     <Icon className="h-4 w-4" />
                   </span>
-                  <span className="text-sm font-medium">{language.label}</span>
+                  <span className={labelClasses}>{language.label}</span>
                 </span>
-                {isActive && <ChevronRight className="h-4 w-4 text-accent" />}
+                <span className="flex items-center gap-2">
+                  {statusIcon}
+                  {isActive && <ChevronRight className="h-4 w-4 text-accent" />}
+                </span>
               </button>
             );
           })}
@@ -239,20 +411,30 @@ export function Workspace({
           ) : (
             <ul className="space-y-1 text-sm">
               {files.map((file) => {
-                const isActive = file === activeFile;
+                const isActive = file.path === activeFile;
+                const stage = file.stagedState;
+
+                const statusClass = stage
+                  ? stage === 'added'
+                    ? 'text-emerald-300 font-semibold'
+                    : 'text-orange-300 font-semibold'
+                  : '';
+
+                const buttonClasses = clsx(
+                  'flex w-full items-center justify-between rounded-md border border-transparent px-3 py-2 text-left font-mono text-[13px] transition duration-150',
+                  isActive
+                    ? 'border-accent-soft/40 bg-accent-soft/25 text-accent'
+                    : 'text-slate-300 hover:border-accent-soft/20 hover:bg-panel/50'
+                );
+
                 return (
-                  <li key={file}>
+                  <li key={file.path}>
                     <button
-                      className={clsx(
-                        'flex w-full items-center justify-between rounded-md border border-transparent px-3 py-2 text-left font-mono text-[13px] transition duration-150',
-                        isActive
-                          ? 'border-accent-soft/40 bg-accent-soft/25 text-accent'
-                          : 'text-slate-300 hover:border-accent-soft/20 hover:bg-panel/50'
-                      )}
-                      onClick={() => handleSelectFile(file)}
+                      className={buttonClasses}
+                      onClick={() => handleSelectFile(file.path)}
                     >
-                      <span className="truncate" title={file}>
-                        {file}
+                      <span className={clsx('truncate', statusClass)} title={file.path}>
+                        {file.path}
                       </span>
                       {isActive && <ArrowUpRight className="h-3.5 w-3.5 text-accent" />}
                     </button>
@@ -276,10 +458,14 @@ export function Workspace({
             {currentLanguage === 'english' ? (
               <button
                 onClick={update}
-                disabled={actionPending}
+                disabled={actionPending || updateRunning}
                 className="inline-flex items-center gap-2 rounded-md border border-accent/60 bg-accent-soft/40 px-4 py-2 text-sm font-semibold text-slate-50 transition hover:bg-accent-soft/60 disabled:cursor-not-allowed disabled:opacity-70"
               >
-                {actionPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                {actionPending || updateRunning ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-4 w-4" />
+                )}
                 Update
               </button>
             ) : (
@@ -304,6 +490,24 @@ export function Workspace({
             )}
           </div>
         </header>
+
+        {progress && (
+          <div className="border-b border-accent/20 bg-accent-soft/10 px-6 py-3 text-sm text-slate-200">
+            <div className="flex items-center justify-between text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
+              <span>Update In Progress</span>
+              <span>{Math.round(progress.value * 100)}%</span>
+            </div>
+            <div className="mt-3 h-2 w-full rounded-full bg-slate-900/70">
+              <div
+                className="h-full rounded-full bg-accent transition-all duration-500"
+                style={{ width: `${Math.min(100, Math.max(6, progress.value * 100))}%` }}
+              />
+            </div>
+            <p className="mt-3 font-mono text-[13px] text-slate-300">
+              {progress.message || 'Coordinating language updates…'}
+            </p>
+          </div>
+        )}
 
         {banner && (
           <div

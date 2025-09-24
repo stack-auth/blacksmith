@@ -1,9 +1,9 @@
 import { NextResponse } from 'next/server';
-import { listLanguagesWithStatus } from '@/lib/fileSystem';
+import { listLanguages } from '@/lib/fileSystem';
 
 export async function GET() {
   try {
-    const languages = await listLanguagesWithStatus();
+    const languages = await listLanguages();
     return NextResponse.json({ languages });
   } catch (error) {
     console.error('Failed to list languages:', error);

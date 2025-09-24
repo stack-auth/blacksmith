@@ -1,18 +1,18 @@
 import { Workspace } from '@/components/Workspace';
-import { getLanguageSnapshot, listLanguagesWithStatus, readFileContent } from '@/lib/fileSystem';
+import { listFiles, listLanguages, readFileContent } from '@/lib/fileSystem';
 
 export default async function Page() {
-  const languages = await listLanguagesWithStatus();
+  const languages = await listLanguages();
   const initialLanguage = languages[0]?.id ?? 'english';
-  const { files: initialFiles } = await getLanguageSnapshot(initialLanguage);
-  const initialFilePath = initialFiles[0]?.path ?? null;
+  const initialFiles = await listFiles(initialLanguage);
+  const initialFilePath = initialFiles[0] ?? null;
   const initialContent = initialFilePath
     ? await readFileContent(initialLanguage, initialFilePath)
     : 'No content available.';
 
   return (
     <Workspace
-      languages={languages}
+      languages={languages.map(({ id, label }) => ({ id, label }))}
       initialLanguage={initialLanguage}
       initialFiles={initialFiles}
       initialFilePath={initialFilePath}

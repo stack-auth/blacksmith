@@ -149,9 +149,9 @@ app.post('/update', async (req, res) => {
             const languageFiles = await readFilesFromDirectory(languagePath);
             const oldLanguageString = concatenateFiles(languageFiles);
 
-            // Call algo function
+            // Call algo function (now async)
             logger.updateSpinner(`lang-${language}`, `Running algorithm for ${language}...`);
-            const result = algo(language, englishString, oldLanguageString);
+            const result = await algo(language, englishString, oldLanguageString);
 
             // Write result files to language folder
             if (result && typeof result === 'object') {
@@ -177,36 +177,6 @@ app.post('/update', async (req, res) => {
         logger.progressBar(LANGUAGES.length, LANGUAGES.length, 'All languages processed!');
         logger.separator();
 
-        // Git commit inside files folder
-        logger.subheader('Committing Changes');
-        const gitSpinner = logger.startSpinner('commit', 'Staging and committing changes...');
-
-        try {
-            await execPromise('git add -A', { cwd: filesPath });
-            logger.gitOperation('git add -A', true);
-
-            // Try regular commit first
-            try {
-                await execPromise('git commit -m "Update language files"', { cwd: filesPath });
-                logger.gitOperation('git commit -m "Update language files"', true);
-                logger.succeedSpinner('commit', 'Changes committed successfully');
-            } catch (commitError) {
-                // If nothing to commit, create an empty commit
-                if (commitError.message.includes('nothing to commit')) {
-                    logger.updateSpinner('commit', 'No changes detected, creating empty commit...');
-                    await execPromise('git commit --allow-empty -m "Update language files (no changes)"', { cwd: filesPath });
-                    logger.gitOperation('git commit --allow-empty -m "Update language files (no changes)"', true);
-                    logger.succeedSpinner('commit', 'Empty commit created successfully');
-                } else {
-                    throw commitError;
-                }
-            }
-        } catch (error) {
-            logger.failSpinner('commit', 'Failed to commit changes');
-            logger.gitOperation('git commit', false);
-            throw error;
-        }
-
         const totalTime = Date.now() - startTime;
         logger.separator();
         logger.success(`✨ Update completed in ${logger.highlight(totalTime + 'ms')}`);
@@ -223,7 +193,7 @@ app.post('/update', async (req, res) => {
 
         res.json({
             success: true,
-            message: 'Language files updated and committed successfully',
+            message: 'Language files updated successfully',
             languages: LANGUAGES,
             processingTime: `${totalTime}ms`
         });
@@ -239,10 +209,115 @@ app.post('/update', async (req, res) => {
     }
 });
 
+// POST /commit endpoint - commits changes to git
+app.post('/commit', async (req, res) => {
+    try {
+        logger.header('Processing Git Commit Request');
+        const startTime = Date.now();
+
+        // Get the files path
+        const filesPath = path.join(__dirname, '..', 'files');
+
+        // Check if files folder exists
+        if (!await fs.pathExists(filesPath)) {
+            logger.error('Files folder does not exist');
+            return res.status(400).json({
+                success: false,
+                error: 'Files folder does not exist. Run /update first.'
+            });
+        }
+
+        // Check if it's a git repository
+        try {
+            await execPromise('git status', { cwd: filesPath });
+        } catch (error) {
+            logger.error('Files folder is not a git repository');
+            return res.status(400).json({
+                success: false,
+                error: 'Files folder is not a git repository'
+            });
+        }
+
+        // Git commit inside files folder
+        logger.subheader('Committing Changes');
+        const gitSpinner = logger.startSpinner('commit', 'Checking for changes...');
+
+        try {
+            // Check for changes
+            const statusResult = await execPromise('git status --porcelain', { cwd: filesPath });
+            const hasChanges = statusResult.stdout.trim().length > 0;
+
+            if (hasChanges) {
+                logger.updateSpinner('commit', 'Staging changes...');
+                await execPromise('git add -A', { cwd: filesPath });
+                logger.gitOperation('git add -A', true);
+
+                logger.updateSpinner('commit', 'Committing changes...');
+                const commitMessage = req.body.message || 'Update language files';
+                await execPromise(`git commit -m "${commitMessage}"`, { cwd: filesPath });
+                logger.gitOperation(`git commit -m "${commitMessage}"`, true);
+                logger.succeedSpinner('commit', 'Changes committed successfully');
+            } else {
+                // Create empty commit if requested
+                if (req.body.allowEmpty) {
+                    logger.updateSpinner('commit', 'No changes detected, creating empty commit...');
+                    const commitMessage = req.body.message || 'Update language files (no changes)';
+                    await execPromise(`git commit --allow-empty -m "${commitMessage}"`, { cwd: filesPath });
+                    logger.gitOperation(`git commit --allow-empty -m "${commitMessage}"`, true);
+                    logger.succeedSpinner('commit', 'Empty commit created successfully');
+                } else {
+                    logger.warnSpinner('commit', 'No changes to commit');
+                    const totalTime = Date.now() - startTime;
+
+                    return res.json({
+                        success: true,
+                        message: 'No changes to commit',
+                        hasChanges: false,
+                        processingTime: `${totalTime}ms`
+                    });
+                }
+            }
+
+            // Get commit info
+            const lastCommit = await execPromise('git log -1 --oneline', { cwd: filesPath });
+            const totalTime = Date.now() - startTime;
+
+            logger.separator();
+            logger.success(`✨ Commit completed in ${logger.highlight(totalTime + 'ms')}`);
+            logger.info(`Last commit: ${lastCommit.stdout.trim()}`);
+            logger.separator();
+
+            res.json({
+                success: true,
+                message: 'Changes committed successfully',
+                hasChanges: hasChanges,
+                lastCommit: lastCommit.stdout.trim(),
+                processingTime: `${totalTime}ms`
+            });
+
+        } catch (error) {
+            logger.failSpinner('commit', 'Failed to commit changes');
+            logger.gitOperation('git commit', false);
+            throw error;
+        }
+
+    } catch (error) {
+        logger.error('❌ Error processing commit:', error.message);
+        logger.debug('Stack trace:', error.stack);
+
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
 app.listen(PORT, () => {
     logger.header('Blacksmith Backend Server');
     logger.success(`🚀 Server running on port ${logger.highlight(PORT)}`);
-    logger.info(`📍 Endpoint: POST http://localhost:${PORT}/update`);
+    logger.info(`📍 Endpoints:`);
+    logger.info(`   - POST http://localhost:${PORT}/update`);
+    logger.info(`   - POST http://localhost:${PORT}/commit`);
     logger.info(`📂 Working directory: ${logger.dim(process.cwd())}`);
     logger.separator();
     logger.info('Waiting for requests...');

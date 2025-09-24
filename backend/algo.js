@@ -6,6 +6,8 @@ const openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY
 });
 
+const cache = new Map();
+
 async function algo(language, englishString, oldLanguageString) {
     logger.debug(`Processing ${language} - English: ${englishString.length} chars, Old: ${oldLanguageString.length} chars`);
 
@@ -52,6 +54,13 @@ ${hasExistingFiles ? JSON.stringify(oldLanguageFiles, null, 2) : '(No existing f
     try {
         logger.debug(`Calling GPT-5 for ${language}...`);
 
+
+        const cacheKey = JSON.stringify({ prompt, input });
+        if (cache.has(cacheKey)) {
+            logger.debug(`Returning cached response for ${language}`);
+            return cache.get(cacheKey);
+        }
+
         const resp = await openai.chat.completions.create({
             model: "gpt-5-nano",
             // Ask for strict JSON output (single JSON object)
@@ -65,6 +74,8 @@ ${hasExistingFiles ? JSON.stringify(oldLanguageFiles, null, 2) : '(No existing f
               { role: 'user', content: input },
             ],
         });
+
+        cache.set(cacheKey, resp);
 
         const outputText = resp.choices?.[0]?.message?.content ?? '';
 

@@ -598,6 +598,129 @@ app.post('/approve', async (req, res) => {
     }
 });
 
+// POST /save-file endpoint - saves and stages a file change for a specific language
+app.post('/save-file', async (req, res) => {
+    try {
+        const { language, filePath, content } = req.body;
+
+        if (!language || !filePath || content === undefined) {
+            return res.status(400).json({
+                success: false,
+                error: 'Language, filePath, and content parameters are required'
+            });
+        }
+
+        if (language !== 'english' && !LANGUAGES.includes(language)) {
+            return res.status(400).json({
+                success: false,
+                error: `Invalid language. Must be 'english' or one of: ${LANGUAGES.join(', ')}`
+            });
+        }
+
+        logger.info(`Saving file ${filePath} for ${language}`);
+
+        // Determine the correct path
+        const basePath = language === 'english'
+            ? path.join(__dirname, '..', 'files', 'english')
+            : path.join(__dirname, '..', 'files', 'languages', language);
+
+        const fullPath = path.join(basePath, filePath);
+
+        // Security check - ensure the path doesn't escape the base directory
+        if (!fullPath.startsWith(basePath)) {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid file path'
+            });
+        }
+
+        // Ensure the directory exists
+        await fs.ensureDir(path.dirname(fullPath));
+
+        // Write the file
+        await fs.writeFile(fullPath, content, 'utf-8');
+        logger.success(`File saved: ${filePath}`);
+
+        // Stage the change in git
+        try {
+            await execPromise('git add -A', { cwd: basePath });
+            logger.success(`Changes staged in git for ${language}`);
+        } catch (error) {
+            logger.error(`Failed to stage changes: ${error.message}`);
+        }
+
+        res.json({
+            success: true,
+            message: `File saved and staged successfully`,
+            language,
+            filePath
+        });
+
+    } catch (error) {
+        logger.error('❌ Error saving file:', error.message);
+        logger.debug('Stack trace:', error.stack);
+
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// GET /file-diff endpoint - gets the diff between staged and committed versions
+app.get('/file-diff', async (req, res) => {
+    try {
+        const { language, filePath } = req.query;
+
+        if (!language || !filePath) {
+            return res.status(400).json({
+                success: false,
+                error: 'Language and filePath parameters are required'
+            });
+        }
+
+        // Determine the correct path
+        const basePath = language === 'english'
+            ? path.join(__dirname, '..', 'files', 'english')
+            : path.join(__dirname, '..', 'files', 'languages', language);
+
+        const fullPath = path.join(basePath, filePath);
+
+        // Get the committed version
+        let committedContent = '';
+        try {
+            const result = await execPromise(`git show HEAD:"${filePath}" 2>/dev/null || echo ""`, { cwd: basePath });
+            committedContent = result.stdout;
+        } catch (e) {
+            // File might not exist in HEAD, that's ok
+            committedContent = '';
+        }
+
+        // Get the current version
+        let currentContent = '';
+        if (await fs.pathExists(fullPath)) {
+            currentContent = await fs.readFile(fullPath, 'utf-8');
+        }
+
+        res.json({
+            success: true,
+            original: committedContent,
+            modified: currentContent,
+            language,
+            filePath
+        });
+
+    } catch (error) {
+        logger.error('❌ Error getting file diff:', error.message);
+        logger.debug('Stack trace:', error.stack);
+
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
 // POST /reject endpoint - rejects and reverts staged changes for a specific language
 app.post('/reject', async (req, res) => {
     try {
@@ -702,6 +825,8 @@ app.listen(PORT, () => {
     logger.info(`📍 Endpoints:`);
     logger.info(`   - POST http://localhost:${PORT}/update`);
     logger.info(`   - GET  http://localhost:${PORT}/progress`);
+    logger.info(`   - POST http://localhost:${PORT}/save-file`);
+    logger.info(`   - GET  http://localhost:${PORT}/file-diff`);
     logger.info(`   - POST http://localhost:${PORT}/approve`);
     logger.info(`   - POST http://localhost:${PORT}/reject`);
     console.log('');

@@ -53,7 +53,7 @@ ${hasExistingFiles ? JSON.stringify(oldLanguageFiles, null, 2) : '(No existing f
         logger.debug(`Calling GPT-5 for ${language}...`);
 
         const resp = await openai.chat.completions.create({
-            model: "gpt-5-mini",
+            model: "gpt-5-nano",
             // Ask for strict JSON output (single JSON object)
             response_format: { type: 'json_object' },
             reasoning_effort: "low",

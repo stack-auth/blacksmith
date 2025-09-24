@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react"
 import { motion } from "framer-motion"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
-import Editor from "@monaco-editor/react"
+import Editor, { DiffEditor } from "@monaco-editor/react"
 import { Loader2, FileText, ChevronRight, ChevronDown } from "lucide-react"
 import {
   Select,
@@ -20,6 +20,7 @@ export default function Home() {
   const [spec, setSpec] = useState<string>(defaultSpec)
   const [isSyncing, setIsSyncing] = useState<boolean>(false)
   const [bundle, setBundle] = useState<Record<string, Record<string, string>> | null>(null)
+  const [originalBundles, setOriginalBundles] = useState<Record<string, Record<string, string>>>({})
   const [englishFiles, setEnglishFiles] = useState<string[]>([])
   const [isLoadingFiles, setIsLoadingFiles] = useState<boolean>(false)
   const [selectedFileName, setSelectedFileName] = useState<string | null>(null)
@@ -150,15 +151,66 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedLangId])
 
+  // Poll for generated file changes every 2 seconds for the active language
+  useEffect(() => {
+    let cancelled = false
+    const lang = getLangById(selectedLangId)
+
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/generated/${lang.backend}`, { cache: "no-store" })
+        if (!res.ok) return
+        const json = await res.json()
+        if (cancelled) return
+        const files: Record<string, string> = json.files || {}
+        // Update originals for any newly appearing files, keep existing originals intact
+        setOriginalBundles((prev) => {
+          const prevForLang = prev[lang.id] || {}
+          const nextForLang: Record<string, string> = { ...prevForLang }
+          for (const [file, content] of Object.entries(files)) {
+            if (!(file in nextForLang)) {
+              nextForLang[file] = content
+            }
+          }
+          if (prevForLang === nextForLang) return prev
+          return { ...prev, [lang.id]: nextForLang }
+        })
+        // Update latest bundle snapshot
+        setBundle({ [lang.id]: files })
+      } catch {
+        // ignore transient polling errors
+      }
+    }, 2000)
+
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedLangId])
+
   async function fetchLanguageFiles(langId: string) {
     const lang = getLangById(langId)
-    const res = await fetch(`/api/generated/${lang.backend}`)
+    const res = await fetch(`/api/generated/${lang.backend}`, { cache: "no-store" })
     if (!res.ok) {
       setBundle(null)
       return
     }
     const json = await res.json()
     const files: Record<string, string> = json.files || {}
+    // Initialize or extend originals for this language without overwriting existing baselines
+    setOriginalBundles((prev) => {
+      const prevForLang = prev[lang.id] || {}
+      const nextForLang: Record<string, string> = { ...prevForLang }
+      for (const [file, content] of Object.entries(files)) {
+        if (!(file in nextForLang)) {
+          nextForLang[file] = content
+        }
+      }
+      if (prevForLang === nextForLang) return prev
+      return { ...prev, [lang.id]: nextForLang }
+    })
+    // Always set the latest bundle contents
     setBundle({ [lang.id]: files })
   }
 
@@ -254,11 +306,7 @@ export default function Home() {
                       disabled={isSyncing}
                     />
                     <div className="px-3 py-2 text-xs text-muted-foreground">
-                      {selectedFileName ? (
-                        <span>Editing <span className="font-medium">{selectedFileName}</span>. Click Sync to save and regenerate SDKs.</span>
-                      ) : (
-                        "Select a file from the sidebar to edit, then click Sync."
-                      )}
+                      
                     </div>
                   </div>
                 </div>
@@ -299,6 +347,8 @@ export default function Home() {
                       {Object.entries(bundle[selectedLangId]).map(([filename, content]) => {
                         const collapsed = collapsedFiles[filename]
                         const monacoLang = getMonacoLanguageForFilename(filename)
+                        const original = originalBundles[selectedLangId]?.[filename]
+                        const hasChanged = typeof original === "string" && original !== content
                         return (
                           <div key={filename} className="">
                             <button
@@ -311,22 +361,40 @@ export default function Home() {
                               </div>
                             </button>
                             {!collapsed && (
-                              <div className="h-[320px] border-t border-border/60">
-                                <Editor
-                                  height="320px"
-                                  defaultLanguage={monacoLang}
-                                  language={monacoLang}
-                                  theme="vs-dark"
-                                  value={content}
-                                  options={{
-                                    readOnly: true,
-                                    minimap: { enabled: false },
-                                    fontSize: 13,
-                                    scrollBeyondLastLine: false,
-                                    wordWrap: "on",
-                                    padding: { top: 12, bottom: 12 },
-                                  }}
-                                />
+                              <div className="h-[400px] border-t border-border/60">
+                                {hasChanged ? (
+                                  <DiffEditor
+                                    height="400px"
+                                    original={original as string}
+                                    modified={content}
+                                    language={monacoLang}
+                                    theme="vs-dark"
+                                    options={{
+                                      readOnly: true,
+                                      renderSideBySide: true,
+                                      minimap: { enabled: false },
+                                      fontSize: 13,
+                                      scrollBeyondLastLine: false,
+                                      wordWrap: "on",
+                                    }}
+                                  />
+                                ) : (
+                                  <Editor
+                                    height="400px"
+                                    defaultLanguage={monacoLang}
+                                    language={monacoLang}
+                                    theme="vs-dark"
+                                    value={content}
+                                    options={{
+                                      readOnly: true,
+                                      minimap: { enabled: false },
+                                      fontSize: 13,
+                                      scrollBeyondLastLine: false,
+                                      wordWrap: "on",
+                                      padding: { top: 12, bottom: 12 },
+                                    }}
+                                  />
+                                )}
                               </div>
                             )}
                           </div>

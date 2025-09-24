@@ -12,7 +12,7 @@ export async function GET() {
       return NextResponse.json({ success: false, error: "English directory not found", files: [] }, { status: 404 })
     }
 
-    return NextResponse.json({ success: true, files: filesList.sort() })
+    return NextResponse.json({ success: true, files: filesList.sort().filter(f => f !== ".git") })
   } catch (err: any) {
     return NextResponse.json(
       { success: false, error: err?.message || "Failed to read english directory" },

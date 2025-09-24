@@ -151,6 +151,49 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedLangId])
 
+  // Prime original content for all languages once on page load
+  useEffect(() => {
+    let cancelled = false
+
+    async function primeAllOriginals() {
+      try {
+        await Promise.all(
+          languages.map(async (lang) => {
+            try {
+              const res = await fetch(`/api/generated/${lang.backend}`, { cache: "no-store" })
+              if (!res.ok) return
+              const json = await res.json()
+              if (cancelled) return
+              const files: Record<string, string> = json.files || {}
+              setOriginalBundles((prev) => {
+                const prevForLang = prev[lang.id] || {}
+                const nextForLang: Record<string, string> = { ...prevForLang }
+                for (const [file, content] of Object.entries(files)) {
+                  if (!(file in nextForLang)) {
+                    nextForLang[file] = content
+                  }
+                }
+                if (prevForLang === nextForLang) return prev
+                return { ...prev, [lang.id]: nextForLang }
+              })
+            } catch {
+              // ignore individual language failures
+            }
+          })
+        )
+      } catch {
+        // ignore aggregate failures
+      }
+    }
+
+    primeAllOriginals()
+
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // Poll for generated file changes every 2 seconds for the active language
   useEffect(() => {
     let cancelled = false

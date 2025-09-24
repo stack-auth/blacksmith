@@ -15,6 +15,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { FileCode2 } from "lucide-react"
+import LanguageIcon from "@/components/icons/language"
 
 export default function Home() {
   const [spec, setSpec] = useState<string>(defaultSpec)
@@ -22,8 +23,17 @@ export default function Home() {
   const [bundle, setBundle] = useState<Record<string, { filename: string; code: string }> | null>(null)
 
   const languages = useMemo(() => [
-    { id: "typescript", backend: "javascript", label: "TypeScript", monacoLang: "typescript" },
-    { id: "python", backend: "python", label: "Python", monacoLang: "python" },
+    { id: "javascript", backend: "javascript", label: "JavaScript", monacoLang: "javascript", icon: "🟨" },
+    { id: "typescript", backend: "javascript", label: "TypeScript", monacoLang: "typescript", icon: "🟦" },
+    { id: "python", backend: "python", label: "Python", monacoLang: "python", icon: "🐍" },
+    { id: "java", backend: "java", label: "Java", monacoLang: "java", icon: "☕" },
+    { id: "csharp", backend: "csharp", label: "C#", monacoLang: "csharp", icon: "♯" },
+    { id: "cpp", backend: "cpp", label: "C++", monacoLang: "cpp", icon: "➕➕" },
+    { id: "ruby", backend: "ruby", label: "Ruby", monacoLang: "ruby", icon: "💎" },
+    { id: "go", backend: "go", label: "Go", monacoLang: "go", icon: "🐹" },
+    { id: "rust", backend: "rust", label: "Rust", monacoLang: "rust", icon: "🦀" },
+    { id: "swift", backend: "swift", label: "Swift", monacoLang: "swift", icon: "🕊️" },
+    { id: "kotlin", backend: "kotlin", label: "Kotlin", monacoLang: "kotlin", icon: "🔷" },
   ], [])
   const [selectedLangId, setSelectedLangId] = useState<string>(languages[0].id)
 
@@ -114,14 +124,14 @@ export default function Home() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {languages.map((lang) => (
-                      <SelectItem key={lang.id} value={lang.id}>
-                        <div className="flex items-center gap-2">
-                          <FileCode2 />
-                          <span>{lang.label}</span>
-                        </div>
-                      </SelectItem>
-                    ))}
+                  {languages.map((lang) => (
+                    <SelectItem key={lang.id} value={lang.id}>
+                      <div className="flex items-center gap-2">
+                        <LanguageIcon id={lang.id} className="w-4 h-4" />
+                        <span>{lang.label}</span>
+                      </div>
+                    </SelectItem>
+                  ))}
                   </SelectContent>
                 </Select>
               </div>

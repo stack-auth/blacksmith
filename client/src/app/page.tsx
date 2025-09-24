@@ -6,25 +6,42 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
-import { generateSdksFromSpec, type GeneratedSdkBundle } from "@/lib/generator"
 import Editor from "@monaco-editor/react"
 import { Loader2 } from "lucide-react"
 
 export default function Home() {
   const [spec, setSpec] = useState<string>(defaultSpec)
   const [isSyncing, setIsSyncing] = useState<boolean>(false)
-  const [bundle, setBundle] = useState<GeneratedSdkBundle | null>(null)
+  const [bundle, setBundle] = useState<Record<string, { filename: string; code: string }> | null>(null)
 
   const languages = useMemo(() => [
-    { id: "typescript", label: "TypeScript", monacoLang: "typescript" },
-    { id: "python", label: "Python", monacoLang: "python" },
+    { id: "typescript", backend: "javascript", label: "TypeScript", monacoLang: "typescript" },
+    { id: "python", backend: "python", label: "Python", monacoLang: "python" },
   ], [])
 
   async function handleSync() {
     setIsSyncing(true)
     try {
-      const result = await generateSdksFromSpec(spec)
-      setBundle(result)
+      // 1) Trigger backend generation
+      const updateRes = await fetch("/api/update", { method: "POST" })
+      if (!updateRes.ok) {
+        throw new Error("Failed to update: " + (await updateRes.text()))
+      }
+      // 2) Fetch generated files for our supported languages
+      const results: Record<string, { filename: string; code: string }> = {}
+      for (const lang of languages) {
+        const res = await fetch(`/api/generated/${lang.backend}`)
+        if (!res.ok) continue
+        const json = await res.json()
+        const files: Record<string, string> = json.files || {}
+        const merged = Object.entries(files)
+          .map(([name, content]) => `=== ${name} ===\n${content}`)
+          .join("\n\n")
+        results[lang.id] = { filename: `${lang.label}.txt`, code: merged }
+      }
+      setBundle(results)
+    } catch (e) {
+      console.error(e)
     } finally {
       setIsSyncing(false)
     }
@@ -82,7 +99,7 @@ export default function Home() {
                         defaultLanguage={lang.monacoLang}
                         language={lang.monacoLang}
                         theme="vs-dark"
-                        value={bundle?.[lang.id as keyof GeneratedSdkBundle]?.code ?? ""}
+                        value={bundle?.[lang.id]?.code ?? ""}
                         options={{
                           readOnly: true,
                           minimap: { enabled: false },

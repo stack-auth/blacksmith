@@ -2,12 +2,19 @@
 
 import { useMemo, useState } from "react"
 import { motion } from "framer-motion"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import Editor from "@monaco-editor/react"
 import { Loader2 } from "lucide-react"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { FileCode2 } from "lucide-react"
 
 export default function Home() {
   const [spec, setSpec] = useState<string>(defaultSpec)
@@ -18,28 +25,35 @@ export default function Home() {
     { id: "typescript", backend: "javascript", label: "TypeScript", monacoLang: "typescript" },
     { id: "python", backend: "python", label: "Python", monacoLang: "python" },
   ], [])
+  const [selectedLangId, setSelectedLangId] = useState<string>(languages[0].id)
+
+  function getLangById(id: string) {
+    return languages.find((l) => l.id === id) ?? languages[0]
+  }
+
+  async function fetchLanguageFiles(langId: string) {
+    const lang = getLangById(langId)
+    const res = await fetch(`/api/generated/${lang.backend}`)
+    if (!res.ok) {
+      setBundle(null)
+      return
+    }
+    const json = await res.json()
+    const files: Record<string, string> = json.files || {}
+    const merged = Object.entries(files)
+      .map(([name, content]) => `=== ${name} ===\n${content}`)
+      .join("\n\n")
+    setBundle({ [lang.id]: { filename: `${lang.label}.txt`, code: merged } })
+  }
 
   async function handleSync() {
     setIsSyncing(true)
     try {
-      // 1) Trigger backend generation
       const updateRes = await fetch("/api/update", { method: "POST" })
       if (!updateRes.ok) {
         throw new Error("Failed to update: " + (await updateRes.text()))
       }
-      // 2) Fetch generated files for our supported languages
-      const results: Record<string, { filename: string; code: string }> = {}
-      for (const lang of languages) {
-        const res = await fetch(`/api/generated/${lang.backend}`)
-        if (!res.ok) continue
-        const json = await res.json()
-        const files: Record<string, string> = json.files || {}
-        const merged = Object.entries(files)
-          .map(([name, content]) => `=== ${name} ===\n${content}`)
-          .join("\n\n")
-        results[lang.id] = { filename: `${lang.label}.txt`, code: merged }
-      }
-      setBundle(results)
+      await fetchLanguageFiles(selectedLangId)
     } catch (e) {
       console.error(e)
     } finally {
@@ -83,40 +97,57 @@ export default function Home() {
             </div>
 
             <div className="min-h-[420px] rounded-xl border border-border/60 overflow-hidden">
-              {bundle ? (
-                <Tabs defaultValue={languages[0].id} className="h-full">
-                  <TabsList className="m-2">
-                    {languages.map((lang) => (
-                      <TabsTrigger key={lang.id} value={lang.id}>
-                        {lang.label}
-                      </TabsTrigger>
-                    ))}
-                  </TabsList>
-                  {languages.map((lang) => (
-                    <TabsContent key={lang.id} value={lang.id} className="h-[calc(100%-3rem)]">
-                      <Editor
-                        height="100%"
-                        defaultLanguage={lang.monacoLang}
-                        language={lang.monacoLang}
-                        theme="vs-dark"
-                        value={bundle?.[lang.id]?.code ?? ""}
-                        options={{
-                          readOnly: true,
-                          minimap: { enabled: false },
-                          fontSize: 13,
-                          scrollBeyondLastLine: false,
-                          wordWrap: "on",
-                          padding: { top: 12, bottom: 12 },
-                        }}
-                      />
-                    </TabsContent>
-                  ))}
-                </Tabs>
-              ) : (
-                <div className="h-full grid place-items-center text-muted-foreground text-sm">
-                  Generated SDKs will appear here after you sync.
+              <div className="flex items-center justify-between p-3 border-b border-border/60 bg-muted/30">
+                <div className="flex items-center gap-2">
+                  <FileCode2 className="opacity-70" />
+                  <span className="text-sm font-medium">Language</span>
                 </div>
-              )}
+                <Select
+                  value={selectedLangId}
+                  onValueChange={async (val) => {
+                    setSelectedLangId(val)
+                    await fetchLanguageFiles(val)
+                  }}
+                  disabled={isSyncing}
+                >
+                  <SelectTrigger className="w-[160px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {languages.map((lang) => (
+                      <SelectItem key={lang.id} value={lang.id}>
+                        <div className="flex items-center gap-2">
+                          <FileCode2 />
+                          <span>{lang.label}</span>
+                        </div>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="h-[calc(420px-49px)]">
+                {bundle && bundle[selectedLangId] ? (
+                  <Editor
+                    height="100%"
+                    defaultLanguage={getLangById(selectedLangId).monacoLang}
+                    language={getLangById(selectedLangId).monacoLang}
+                    theme="vs-dark"
+                    value={bundle[selectedLangId]?.code ?? ""}
+                    options={{
+                      readOnly: true,
+                      minimap: { enabled: false },
+                      fontSize: 13,
+                      scrollBeyondLastLine: false,
+                      wordWrap: "on",
+                      padding: { top: 12, bottom: 12 },
+                    }}
+                  />
+                ) : (
+                  <div className="h-full grid place-items-center text-muted-foreground text-sm">
+                    Select a language and click Sync to view generated SDK files.
+                  </div>
+                )}
+              </div>
             </div>
           </section>
         </motion.div>

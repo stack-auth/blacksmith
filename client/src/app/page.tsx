@@ -1,12 +1,11 @@
 "use client"
 
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { motion } from "framer-motion"
 import { Button } from "@/components/ui/button"
-import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import Editor from "@monaco-editor/react"
-import { Loader2 } from "lucide-react"
+import { Loader2, FileText, ChevronRight, ChevronDown } from "lucide-react"
 import {
   Select,
   SelectContent,
@@ -20,7 +19,13 @@ import LanguageIcon from "@/components/icons/language"
 export default function Home() {
   const [spec, setSpec] = useState<string>(defaultSpec)
   const [isSyncing, setIsSyncing] = useState<boolean>(false)
-  const [bundle, setBundle] = useState<Record<string, { filename: string; code: string }> | null>(null)
+  const [bundle, setBundle] = useState<Record<string, Record<string, string>> | null>(null)
+  const [englishFiles, setEnglishFiles] = useState<string[]>([])
+  const [isLoadingFiles, setIsLoadingFiles] = useState<boolean>(false)
+  const [selectedFileName, setSelectedFileName] = useState<string | null>(null)
+  const [originalSpec, setOriginalSpec] = useState<string>("")
+  const [collapsedFiles, setCollapsedFiles] = useState<Record<string, boolean>>({})
+  
 
   const languages = useMemo(() => [
     { id: "javascript", backend: "javascript", label: "JavaScript", monacoLang: "javascript", icon: "🟨" },
@@ -41,6 +46,110 @@ export default function Home() {
     return languages.find((l) => l.id === id) ?? languages[0]
   }
 
+  function inferLangIdFromFile(fileName: string): string | null {
+    const base = fileName.replace(/\.[^/.]+$/, "").toLowerCase()
+    const candidate = languages.find((l) => l.id.toLowerCase() === base || l.label.toLowerCase() === base)
+    return candidate ? candidate.id : null
+  }
+
+  function getMonacoLanguageForFilename(filename: string): string {
+    const ext = filename.split(".").pop()?.toLowerCase() || ""
+    switch (ext) {
+      case "js":
+      case "jsx":
+        return "javascript"
+      case "ts":
+      case "tsx":
+        return "typescript"
+      case "py":
+        return "python"
+      case "java":
+        return "java"
+      case "cs":
+        return "csharp"
+      case "cpp":
+      case "cc":
+      case "cxx":
+      case "hpp":
+      case "hh":
+      case "hxx":
+        return "cpp"
+      case "rb":
+        return "ruby"
+      case "go":
+        return "go"
+      case "rs":
+        return "rust"
+      case "swift":
+        return "swift"
+      case "kt":
+      case "kts":
+        return "kotlin"
+      case "json":
+        return "json"
+      case "yml":
+      case "yaml":
+        return "yaml"
+      case "md":
+        return "markdown"
+      default:
+        return "plaintext"
+    }
+  }
+
+  async function fetchEnglishFiles() {
+    setIsLoadingFiles(true)
+    try {
+      const res = await fetch("/api/english")
+      if (!res.ok) throw new Error(await res.text())
+      const json = await res.json()
+      const files: string[] = json.files || []
+      setEnglishFiles(files)
+    } catch (e) {
+      console.error(e)
+      setEnglishFiles([])
+    } finally {
+      setIsLoadingFiles(false)
+    }
+  }
+
+  async function loadEnglishFile(name: string) {
+    try {
+      const res = await fetch(`/api/english/${encodeURIComponent(name)}`)
+      if (!res.ok) throw new Error(await res.text())
+      const json = await res.json()
+      const content: string = json.content || ""
+      setSelectedFileName(name)
+      setSpec(content)
+      setOriginalSpec(content)
+      const inferred = inferLangIdFromFile(name)
+      if (inferred) {
+        setSelectedLangId(inferred)
+        await fetchLanguageFiles(inferred)
+      }
+    } catch (e) {
+      console.error(e)
+    }
+  }
+
+  useEffect(() => {
+    fetchEnglishFiles()
+  }, [])
+
+  useEffect(() => {
+    if (!selectedFileName && englishFiles.length > 0) {
+      // Auto-select first file by default
+      loadEnglishFile(englishFiles[0])
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [englishFiles])
+
+  // Ensure generated bundle is fetched on initial load
+  useEffect(() => {
+    fetchLanguageFiles(selectedLangId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedLangId])
+
   async function fetchLanguageFiles(langId: string) {
     const lang = getLangById(langId)
     const res = await fetch(`/api/generated/${lang.backend}`)
@@ -50,15 +159,23 @@ export default function Home() {
     }
     const json = await res.json()
     const files: Record<string, string> = json.files || {}
-    const merged = Object.entries(files)
-      .map(([name, content]) => `=== ${name} ===\n${content}`)
-      .join("\n\n")
-    setBundle({ [lang.id]: { filename: `${lang.label}.txt`, code: merged } })
+    setBundle({ [lang.id]: files })
   }
 
   async function handleSync() {
     setIsSyncing(true)
     try {
+      if (selectedFileName) {
+        const saveRes = await fetch(`/api/english/${encodeURIComponent(selectedFileName)}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: spec }),
+        })
+        if (!saveRes.ok) {
+          throw new Error("Failed to save: " + (await saveRes.text()))
+        }
+        setOriginalSpec(spec)
+      }
       const updateRes = await fetch("/api/update", { method: "POST" })
       if (!updateRes.ok) {
         throw new Error("Failed to update: " + (await updateRes.text()))
@@ -72,15 +189,15 @@ export default function Home() {
   }
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
-      <div className="mx-auto max-w-6xl px-6 py-10">
+    <div className="h-screen bg-background text-foreground">
+      <div className="flex flex-col h-full">
         <motion.div
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4 }}
-          className="space-y-6"
+          className="flex flex-col h-full"
         >
-          <header className="flex items-center justify-between">
+          <header className="flex items-center justify-between h-14 px-6 border-b border-border/60 bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60 sticky top-0 z-10">
             <h1 className="text-2xl font-semibold tracking-tight">Blacksmith</h1>
             <div className="flex items-center gap-3">
               <Button onClick={handleSync} disabled={isSyncing}>
@@ -90,76 +207,141 @@ export default function Home() {
             </div>
           </header>
 
-          <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <div className="space-y-2">
-              <Label htmlFor="spec">Spec</Label>
-              <Textarea
-                id="spec"
-                value={spec}
-                onChange={(e) => setSpec(e.target.value)}
-                placeholder="Write your Blacksmith spec here..."
-                className="min-h-[360px]"
-                disabled={isSyncing}
-              />
-              <p className="text-xs text-muted-foreground">
-                Define your SDK surface in English. Click Sync to generate SDKs.
-              </p>
-            </div>
-
-            <div className="min-h-[420px] rounded-xl border border-border/60 overflow-hidden">
-              <div className="flex items-center justify-between p-3 border-b border-border/60 bg-muted/30">
-                <div className="flex items-center gap-2">
-                  <FileCode2 className="opacity-70" />
-                  <span className="text-sm font-medium">Language</span>
-                </div>
-                <Select
-                  value={selectedLangId}
-                  onValueChange={async (val) => {
-                    setSelectedLangId(val)
-                    await fetchLanguageFiles(val)
-                  }}
-                  disabled={isSyncing}
-                >
-                  <SelectTrigger className="w-[160px]">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                  {languages.map((lang) => (
-                    <SelectItem key={lang.id} value={lang.id}>
-                      <div className="flex items-center gap-2">
-                        <LanguageIcon id={lang.id} className="w-4 h-4" />
-                        <span>{lang.label}</span>
-                      </div>
-                    </SelectItem>
-                  ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="h-[calc(420px-49px)]">
-                {bundle && bundle[selectedLangId] ? (
-                  <Editor
-                    height="100%"
-                    defaultLanguage={getLangById(selectedLangId).monacoLang}
-                    language={getLangById(selectedLangId).monacoLang}
-                    theme="vs-dark"
-                    value={bundle[selectedLangId]?.code ?? ""}
-                    options={{
-                      readOnly: true,
-                      minimap: { enabled: false },
-                      fontSize: 13,
-                      scrollBeyondLastLine: false,
-                      wordWrap: "on",
-                      padding: { top: 12, bottom: 12 },
-                    }}
-                  />
-                ) : (
-                  <div className="h-full grid place-items-center text-muted-foreground text-sm">
-                    Select a language and click Sync to view generated SDK files.
+          <main className="flex-1 overflow-hidden px-6 py-4">
+          <section className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-full">
+            
+              <div className="rounded-xl border border-border/60 overflow-hidden h-full">
+                <div className="flex items-center justify-between p-3 border-b border-border/60 bg-muted/30">
+                  <div className="flex items-center gap-2">
+                    <FileText className="opacity-70" />
+                    <span className="text-sm font-medium">Spec</span>
                   </div>
-                )}
+                  <div className="flex items-center gap-2">
+                    <Select
+                      value={selectedFileName ?? ""}
+                      onValueChange={async (val) => {
+                        if (selectedFileName && spec !== originalSpec) {
+                          const proceed = window.confirm("You have unsaved changes. Switch file and discard?")
+                          if (!proceed) return
+                        }
+                        await loadEnglishFile(val)
+                      }}
+                      disabled={isLoadingFiles || isSyncing}
+                    >
+                      <SelectTrigger className="w-[240px]">
+                        <SelectValue placeholder={isLoadingFiles ? "Loading files..." : "Select a file"} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {englishFiles.length === 0 ? (
+                          <div className="px-3 py-2 text-sm text-muted-foreground">No files found</div>
+                        ) : (
+                          englishFiles.map((f) => (
+                            <SelectItem key={f} value={f}>{f}</SelectItem>
+                          ))
+                        )}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+                <div className="h-[calc(100%-49px)]">
+                  <div className="h-full flex flex-col">
+                    <Textarea
+                      id="spec"
+                      value={spec}
+                      onChange={(e) => setSpec(e.target.value)}
+                      placeholder="Write your Blacksmith spec here..."
+                      className="flex-1 resize-none"
+                      disabled={isSyncing}
+                    />
+                    <div className="px-3 py-2 text-xs text-muted-foreground">
+                      {selectedFileName ? (
+                        <span>Editing <span className="font-medium">{selectedFileName}</span>. Click Sync to save and regenerate SDKs.</span>
+                      ) : (
+                        "Select a file from the sidebar to edit, then click Sync."
+                      )}
+                    </div>
+                  </div>
+                </div>
               </div>
-            </div>
-          </section>
+
+              <div className="rounded-xl border border-border/60 overflow-hidden h-full">
+                <div className="flex items-center justify-between p-3 border-b border-border/60 bg-muted/30">
+                  <div className="flex items-center gap-2">
+                    <FileCode2 className="opacity-70" />
+                    <span className="text-sm font-medium">Language</span>
+                  </div>
+                  <Select
+                    value={selectedLangId}
+                    onValueChange={async (val) => {
+                      setSelectedLangId(val)
+                      await fetchLanguageFiles(val)
+                    }}
+                    disabled={isSyncing}
+                  >
+                    <SelectTrigger className="w-[160px]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                    {languages.map((lang) => (
+                      <SelectItem key={lang.id} value={lang.id}>
+                        <div className="flex items-center gap-2">
+                          <LanguageIcon id={lang.id} className="w-4 h-4" />
+                          <span>{lang.label}</span>
+                        </div>
+                      </SelectItem>
+                    ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="h-[calc(100%-49px)] overflow-auto">
+                  {bundle && bundle[selectedLangId] ? (
+                    <div className="divide-y divide-border/60">
+                      {Object.entries(bundle[selectedLangId]).map(([filename, content]) => {
+                        const collapsed = collapsedFiles[filename]
+                        const monacoLang = getMonacoLanguageForFilename(filename)
+                        return (
+                          <div key={filename} className="">
+                            <button
+                              className="w-full flex items-center justify-between px-3 py-2 text-sm hover:bg-muted/40"
+                              onClick={() => setCollapsedFiles((prev) => ({ ...prev, [filename]: !prev[filename] }))}
+                            >
+                              <div className="flex items-center gap-2">
+                                {collapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                                <span className="font-medium">{filename}</span>
+                              </div>
+                            </button>
+                            {!collapsed && (
+                              <div className="h-[320px] border-t border-border/60">
+                                <Editor
+                                  height="320px"
+                                  defaultLanguage={monacoLang}
+                                  language={monacoLang}
+                                  theme="vs-dark"
+                                  value={content}
+                                  options={{
+                                    readOnly: true,
+                                    minimap: { enabled: false },
+                                    fontSize: 13,
+                                    scrollBeyondLastLine: false,
+                                    wordWrap: "on",
+                                    padding: { top: 12, bottom: 12 },
+                                  }}
+                                />
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  ) : (
+                    <div className="h-full grid place-items-center text-muted-foreground text-sm">
+                      Select a file and click Sync to view generated SDK files.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </section>
+          </main>
         </motion.div>
       </div>
     </div>
